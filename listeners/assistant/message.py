@@ -2,7 +2,7 @@ import time
 from logging import Logger
 
 from openai.types.responses import ResponseInputParam
-from slack_bolt import BoltContext, Say, SetStatus
+from slack_bolt import BoltAgent, BoltContext, Say, SetStatus
 from slack_sdk import WebClient
 from slack_sdk.models.messages.chunk import (
     MarkdownTextChunk,
@@ -15,6 +15,7 @@ from listeners.views.feedback_block import create_feedback_block
 
 
 def message(
+    agent: BoltAgent,
     client: WebClient,
     context: BoltContext,
     logger: Logger,
@@ -27,6 +28,7 @@ def message(
     Handles when users send messages or select a prompt in an assistant thread and generate AI responses:
 
     Args:
+        agent: BoltAgent for making API calls
         client: Slack WebClient for making API calls
         context: Bolt context containing channel and thread information
         logger: Logger instance for error tracking
@@ -56,13 +58,7 @@ def message(
 
             time.sleep(4)
 
-            streamer = client.chat_stream(
-                channel=channel_id,
-                recipient_team_id=team_id,
-                recipient_user_id=user_id,
-                thread_ts=thread_ts,
-                task_display_mode="plan",
-            )
+            streamer = agent.chat_stream(task_display_mode="plan")
             streamer.append(
                 chunks=[
                     MarkdownTextChunk(
@@ -140,13 +136,7 @@ def message(
                 ],
             )
 
-            streamer = client.chat_stream(
-                channel=channel_id,
-                recipient_team_id=team_id,
-                recipient_user_id=user_id,
-                thread_ts=thread_ts,
-                task_display_mode="timeline",
-            )
+            streamer = agent.chat_stream(task_display_mode="timeline")
             prompts: ResponseInputParam = [
                 {
                     "role": "user",

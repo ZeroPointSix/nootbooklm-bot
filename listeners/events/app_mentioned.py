@@ -1,19 +1,20 @@
 from logging import Logger
 
 from openai.types.responses import ResponseInputParam
-from slack_bolt import Say
+from slack_bolt import BoltAgent, Say
 from slack_sdk import WebClient
 
 from agent.llm_caller import call_llm
 from listeners.views.feedback_block import create_feedback_block
 
 
-def app_mentioned_callback(client: WebClient, event: dict, logger: Logger, say: Say):
+def app_mentioned_callback(agent: BoltAgent, client: WebClient, event: dict, logger: Logger, say: Say):
     """
     Handles the event when the app is mentioned in a Slack conversation
     and generates an AI response.
 
     Args:
+        agent: BoltAgent for making API calls
         client: Slack WebClient for making API calls
         event: Event payload containing mention details (channel, user, text, etc.)
         logger: Logger instance for error tracking
@@ -39,12 +40,7 @@ def app_mentioned_callback(client: WebClient, event: dict, logger: Logger, say: 
             ],
         )
 
-        streamer = client.chat_stream(
-            channel=channel_id,
-            recipient_team_id=team_id,
-            recipient_user_id=user_id,
-            thread_ts=thread_ts,
-        )
+        streamer = agent.chat_stream()
         prompts: ResponseInputParam = [
             {
                 "role": "user",
