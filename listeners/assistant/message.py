@@ -1,18 +1,24 @@
+import time
 from logging import Logger
-from typing import Dict, List
 
+from openai.types.responses import ResponseInputParam
 from slack_bolt import BoltContext, Say, SetStatus
 from slack_sdk import WebClient
+from slack_sdk.models.messages.chunk import (
+    MarkdownTextChunk,
+    PlanUpdateChunk,
+    TaskUpdateChunk,
+)
 
-from ai.llm_caller import call_llm
-
-from ..views.feedback_block import create_feedback_block
+from agent.llm_caller import call_llm
+from listeners.views.feedback_block import create_feedback_block
 
 
 def message(
     client: WebClient,
     context: BoltContext,
     logger: Logger,
+    message: dict,
     payload: dict,
     say: Say,
     set_status: SetStatus,
@@ -34,47 +40,125 @@ def message(
         thread_ts = payload["thread_ts"]
         user_id = context.user_id
 
-        set_status(
-            status="thinking...",
-            loading_messages=[
-                "Teaching the hamsters to type faster…",
-                "Untangling the internet cables…",
-                "Consulting the office goldfish…",
-                "Polishing up the response just for you…",
-                "Convincing the AI to stop overthinking…",
-            ],
-        )
+        # The first example shows a message with thinking steps that has different
+        # chunks to construct and update a plan alongside text outputs.
+        if message["text"] == "Wonder a few deep thoughts.":
+            set_status(
+                status="thinking...",
+                loading_messages=[
+                    "Teaching the hamsters to type faster…",
+                    "Untangling the internet cables…",
+                    "Consulting the office goldfish…",
+                    "Polishing up the response just for you…",
+                    "Convincing the AI to stop overthinking…",
+                ],
+            )
 
-        replies = client.conversations_replies(
-            channel=context.channel_id,
-            ts=context.thread_ts,
-            oldest=context.thread_ts,
-            limit=10,
-        )
-        messages_in_thread: List[Dict[str, str]] = []
-        for message in replies["messages"]:
-            role = "user" if message.get("bot_id") is None else "assistant"
-            messages_in_thread.append({"role": role, "content": message["text"]})
+            time.sleep(4)
 
-        returned_message = call_llm(messages_in_thread)
+            streamer = client.chat_stream(
+                channel=channel_id,
+                recipient_team_id=team_id,
+                recipient_user_id=user_id,
+                thread_ts=thread_ts,
+                task_display_mode="plan",
+            )
+            streamer.append(
+                chunks=[
+                    MarkdownTextChunk(
+                        text="Hello.\nI have received the task. ",
+                    ),
+                    MarkdownTextChunk(
+                        text="This task appears manageable.\nThat is good.",
+                    ),
+                    TaskUpdateChunk(
+                        id="001",
+                        title="Understanding the task...",
+                        status="in_progress",
+                        details="- Identifying the goal\n- Identifying constraints",
+                    ),
+                    TaskUpdateChunk(
+                        id="002",
+                        title="Performing acrobatics...",
+                        status="pending",
+                    ),
+                ],
+            )
+            time.sleep(4)
 
-        streamer = client.chat_stream(
-            channel=channel_id,
-            recipient_team_id=team_id,
-            recipient_user_id=user_id,
-            thread_ts=thread_ts,
-        )
+            streamer.append(
+                chunks=[
+                    PlanUpdateChunk(
+                        title="Adding the final pieces...",
+                    ),
+                    TaskUpdateChunk(
+                        id="001",
+                        title="Understanding the task...",
+                        status="complete",
+                        details="\n- Pretending this was obvious",
+                        output="We'll continue to ramble now",
+                    ),
+                    TaskUpdateChunk(
+                        id="002",
+                        title="Performing acrobatics...",
+                        status="in_progress",
+                    ),
+                ],
+            )
+            time.sleep(4)
 
-        # Loop over OpenAI response stream
-        # https://platform.openai.com/docs/api-reference/responses/create
-        for event in returned_message:
-            if event.type == "response.output_text.delta":
-                streamer.append(markdown_text=f"{event.delta}")
-            else:
-                continue
+            feedback_block = create_feedback_block()
+            streamer.stop(
+                chunks=[
+                    PlanUpdateChunk(
+                        title="Decided to put on a show",
+                    ),
+                    TaskUpdateChunk(
+                        id="002",
+                        title="Performing acrobatics...",
+                        status="complete",
+                        details="- Jumped atop ropes\n- Juggled bowling pins\n- Rode a single wheel too",
+                    ),
+                    MarkdownTextChunk(
+                        text="The crowd appears to be astounded and applauds :popcorn:"
+                    ),
+                ],
+                blocks=feedback_block,
+            )
 
-        feedback_block = create_feedback_block()
-        streamer.stop(blocks=feedback_block)
+        # This second example shows a generated text response for a provided prompt
+        # displayed as a timeline.
+        else:
+            set_status(
+                status="thinking...",
+                loading_messages=[
+                    "Teaching the hamsters to type faster…",
+                    "Untangling the internet cables…",
+                    "Consulting the office goldfish…",
+                    "Polishing up the response just for you…",
+                    "Convincing the AI to stop overthinking…",
+                ],
+            )
+
+            streamer = client.chat_stream(
+                channel=channel_id,
+                recipient_team_id=team_id,
+                recipient_user_id=user_id,
+                thread_ts=thread_ts,
+                task_display_mode="timeline",
+            )
+            prompts: ResponseInputParam = [
+                {
+                    "role": "user",
+                    "content": message["text"],
+                },
+            ]
+            call_llm(streamer, prompts)
+
+            feedback_block = create_feedback_block()
+            streamer.stop(
+                blocks=feedback_block,
+            )
 
     except Exception as e:
         logger.exception(f"Failed to handle a user message event: {e}")
