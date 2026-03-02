@@ -99,7 +99,7 @@ source .venv/bin/activate  # for Windows OS, .\.venv\Scripts\Activate instead sh
 #### Install dependencies
 
 ```sh
-pip install -e ".[dev]"
+pip install ".[dev]"
 ```
 
 </details>
