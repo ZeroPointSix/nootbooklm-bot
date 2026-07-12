@@ -252,7 +252,8 @@ class SQLiteLoginSessionStore(LoginSessionStore):
             self._expire_db(now)
             session = self._row(
                 self._db.execute(
-                    "SELECT * FROM login_sessions WHERE token_hash=?", (_token_hash(token),)
+                    "SELECT * FROM login_sessions WHERE token_hash=?",
+                    (_token_hash(token),),
                 ).fetchone()
             )
             if not session or session.status != LoginStatus.PENDING:
@@ -311,5 +312,7 @@ class SQLiteLoginSessionStore(LoginSessionStore):
     def cancel_active(self):
         session = self.active()
         return (
-            self.transition(session.session_id, LoginStatus.CANCELLED) if session else None
+            self.transition(session.session_id, LoginStatus.CANCELLED)
+            if session
+            else None
         )

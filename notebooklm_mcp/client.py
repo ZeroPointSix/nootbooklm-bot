@@ -91,9 +91,7 @@ class _StdioTransport:
             {"jsonrpc": "2.0", "id": request_id, "method": method, "params": params}
         )
         while True:
-            ready, _, _ = select.select(
-                [self._process.stdout], [], [], self.timeout
-            )
+            ready, _, _ = select.select([self._process.stdout], [], [], self.timeout)
             if not ready:
                 self.close()
                 raise MCPError("MCP_TIMEOUT", "NotebookLM MCP 请求超时")
