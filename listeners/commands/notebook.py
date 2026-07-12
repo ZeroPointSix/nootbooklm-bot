@@ -19,7 +19,7 @@ def notebook_command(ack, command: dict, respond) -> None:
     if action == "help":
         respond(
             "可用命令：/notebook login、/notebook login cancel、"
-            "/notebook status、/notebook logout"
+            "/notebook status、/notebook logout confirm"
         )
         return
     if action == "status":
@@ -57,6 +57,9 @@ def notebook_command(ack, command: dict, respond) -> None:
         )
         return
     if action == "logout":
+        if len(parts) < 2 or parts[1].lower() != "confirm":
+            respond("退出会删除默认账号登录态。请执行 /notebook logout confirm 确认。")
+            return
         _sessions.cancel_active()
         _profiles.logout()
         respond("NotebookLM 默认账号登录态已清除。")

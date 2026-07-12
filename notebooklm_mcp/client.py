@@ -155,15 +155,31 @@ class MCPClient:
         url: str | None = None,
         timeout: float = 30,
     ):
+        self._configuration = {
+            "transport": transport,
+            "command": command,
+            "url": url,
+            "timeout": timeout,
+        }
+        self._transport = self._build_transport()
+
+    def _build_transport(self):
+        transport = self._configuration["transport"]
+        command = self._configuration["command"]
+        url = self._configuration["url"]
+        timeout = self._configuration["timeout"]
         if transport == "stdio":
-            self._transport = _StdioTransport(command, timeout)
-        elif transport == "http" and url:
-            self._transport = _HTTPTransport(url, timeout)
-        else:
-            raise ValueError("无效的 MCP 传输配置")
+            return _StdioTransport(command, timeout)
+        if transport == "http" and url:
+            return _HTTPTransport(url, timeout)
+        raise ValueError("无效的 MCP 传输配置")
 
     def close(self) -> None:
         self._transport.close()
+
+    def reconnect(self) -> None:
+        self._transport.close()
+        self._transport = self._build_transport()
 
     def list_tools(self) -> list[ToolDefinition]:
         result = self._transport.request("tools/list", {})

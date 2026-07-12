@@ -33,6 +33,17 @@ def test_failed_verification_does_not_replace_existing_profile(tmp_path):
     assert json.loads(path.read_text()) == {"old": True}
 
 
+def test_verifier_reads_new_profile_at_final_path(tmp_path):
+    path = tmp_path / "storage_state.json"
+    manager = ProfileManager(str(path))
+    seen = []
+    manager.install(
+        VALID_STATE,
+        verify=lambda candidate: seen.append(json.loads(candidate.read_text())) or True,
+    )
+    assert seen == [VALID_STATE]
+
+
 @pytest.mark.parametrize(
     "state",
     [{}, {"cookies": [], "origins": []}, {"cookies": "secret", "origins": []}],

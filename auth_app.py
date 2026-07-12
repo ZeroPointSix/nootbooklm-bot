@@ -5,6 +5,7 @@ import hmac
 from fastapi import FastAPI, Header, HTTPException
 from fastapi.responses import HTMLResponse, RedirectResponse
 from pydantic import BaseModel
+from slack_sdk import WebClient
 
 from agent.llm_caller import get_runtime
 from auth.browser import ExternalBrowserWorker
@@ -64,16 +65,30 @@ def complete_login(
 
     def verify(_path) -> bool:
         try:
-            return bool(get_runtime().mcp.list_tools())
+            runtime = get_runtime()
+            runtime.mcp.reconnect()
+            runtime.mcp.list_tools()
+            return True
         except Exception:
             return False
 
     try:
         get_profile_manager().install(request.storage_state, verify=verify)
-        get_session_store().transition(request.session_id, LoginStatus.AUTHENTICATED)
+        completed = get_session_store().transition(
+            request.session_id, LoginStatus.AUTHENTICATED
+        )
     except Exception as exc:
         get_session_store().transition(
             request.session_id, LoginStatus.FAILED, "AUTH_VERIFICATION_FAILED"
         )
         raise HTTPException(status_code=422, detail="认证验证失败") from exc
+    if settings.slack_bot_token:
+        try:
+            WebClient(token=settings.slack_bot_token).chat_postMessage(
+                channel=completed.slack_channel_id,
+                thread_ts=completed.slack_thread_ts,
+                text="NotebookLM 登录成功。默认账号现在可以使用。",
+            )
+        except Exception:
+            pass
     return {"status": "authenticated"}

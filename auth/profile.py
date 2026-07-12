@@ -37,17 +37,20 @@ class ProfileManager:
                 handle.flush()
                 os.fsync(handle.fileno())
             temporary.chmod(0o600)
-            if not verify(temporary):
-                raise ProfileError("NotebookLM 认证验证失败")
             if self.path.exists():
                 os.replace(self.path, backup)
             os.replace(temporary, self.path)
+            if not verify(self.path):
+                raise ProfileError("NotebookLM 认证验证失败")
             if backup.exists():
                 backup.unlink()
         except Exception:
             temporary.unlink(missing_ok=True)
-            if backup.exists() and not self.path.exists():
+            if backup.exists():
+                self.path.unlink(missing_ok=True)
                 os.replace(backup, self.path)
+            elif self.path.exists():
+                self.path.unlink()
             raise
 
     def logout(self) -> None:
