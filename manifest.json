@@ -1,7 +1,8 @@
 {
   "$schema": "https://raw.githubusercontent.com/slackapi/manifest-schema/main/manifest.schema.json",
   "display_information": {
-    "name": "Bolt Python AI Agent"
+    "name": "NotebookLM Research Agent",
+    "description": "在 Slack 中使用 NotebookLM 进行资料研究"
   },
   "features": {
     "app_home": {
@@ -10,13 +11,21 @@
       "messages_tab_read_only_enabled": false
     },
     "bot_user": {
-      "display_name": "Bolt Python AI Agent",
+      "display_name": "NotebookLM Agent",
       "always_online": true
     },
     "assistant_view": {
-      "assistant_description": "Hi, I am an agent built using Bolt for Python. I am here to help you out!",
+      "assistant_description": "连接 NotebookLM，添加资料、提问、总结和比较研究结论。",
       "suggested_prompts": []
-    }
+    },
+    "slash_commands": [
+      {
+        "command": "/notebook",
+        "description": "管理 NotebookLM 登录与状态",
+        "usage_hint": "login | status | logout | help",
+        "should_escape": false
+      }
+    ]
   },
   "oauth_config": {
     "scopes": {
@@ -37,7 +46,7 @@
       ]
     },
     "interactivity": {
-      "is_enabled": false
+      "is_enabled": true
     },
     "org_deploy_enabled": true,
     "socket_mode_enabled": true,

@@ -17,19 +17,19 @@ def assistant_thread_started(
         logger: Logger instance for error tracking
     """
     try:
-        say("What would you like to do today?")
+        say("今天想用 NotebookLM 研究什么？")
         set_suggested_prompts(
             prompts=[
                 {
-                    "title": "Prompt a task with thinking steps",
-                    "message": "Wonder a few deep thoughts.",
+                    "title": "列出 Notebook",
+                    "message": "列出当前账号可用的 Notebook。",
                 },
                 {
-                    "title": "Roll dice for a random number",
-                    "message": "Roll two 12-sided dice and three 6-sided dice for a pseudo-random score.",
+                    "title": "检查登录状态",
+                    "message": "检查 NotebookLM 登录状态。",
                 },
             ]
         )
-    except Exception as e:
-        logger.exception(f"Failed to handle an assistant_thread_started event: {e}", e)
-        say(f":warning: Something went wrong! ({e})")
+    except Exception:
+        logger.exception("处理 assistant_thread_started 失败")
+        say(":warning: NotebookLM Assistant 初始化失败，请稍后重试。")

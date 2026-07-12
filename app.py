@@ -7,18 +7,22 @@ from slack_bolt.adapter.socket_mode import SocketModeHandler
 from slack_sdk import WebClient
 
 from listeners import register_listeners
+from config import Settings
 
 # Load environment variables
 load_dotenv(dotenv_path=".env", override=False)
+
+settings = Settings.from_env()
+settings.validate_bot()
 
 # Initialization
 logging.basicConfig(level=logging.DEBUG)
 
 app = App(
-    token=os.environ.get("SLACK_BOT_TOKEN"),
+    token=settings.slack_bot_token,
     client=WebClient(
         base_url=os.environ.get("SLACK_API_URL", "https://slack.com/api"),
-        token=os.environ.get("SLACK_BOT_TOKEN"),
+        token=settings.slack_bot_token,
     ),
 )
 
@@ -27,4 +31,4 @@ register_listeners(app)
 
 # Start Bolt app
 if __name__ == "__main__":
-    SocketModeHandler(app, os.environ.get("SLACK_APP_TOKEN")).start()
+    SocketModeHandler(app, settings.slack_app_token).start()

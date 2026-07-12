@@ -1,0 +1,24 @@
+services:
+  bot:
+    build: .
+    env_file: .env
+    restart: unless-stopped
+    volumes:
+      - notebooklm-profile:/data/notebooklm
+    environment:
+      NOTEBOOKLM_PROFILE_PATH: /data/notebooklm/profiles/default/storage_state.json
+      AUTH_SESSION_DB_PATH: /data/notebooklm/login-sessions.db
+  auth:
+    build: .
+    env_file: .env
+    command: ["uvicorn", "auth_app:app", "--host", "0.0.0.0", "--port", "8080", "--no-access-log"]
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8080:8080"
+    volumes:
+      - notebooklm-profile:/data/notebooklm
+    environment:
+      NOTEBOOKLM_PROFILE_PATH: /data/notebooklm/profiles/default/storage_state.json
+      AUTH_SESSION_DB_PATH: /data/notebooklm/login-sessions.db
+volumes:
+  notebooklm-profile:

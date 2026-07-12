@@ -1,101 +1,184 @@
+from __future__ import annotations
+
 import json
-import os
+from functools import lru_cache
+from typing import Any, Protocol
 
 import openai
 from openai.types.responses import ResponseInputParam
 from slack_sdk.models.messages.chunk import TaskUpdateChunk
 from slack_sdk.web.chat_stream import ChatStream
 
-from agent.tools.dice import roll_dice, roll_dice_definition
+from notebooklm_mcp import MCPClient, MCPError, ToolDefinition
+from config import Settings
+
+SYSTEM_PROMPT = """你是 Slack 中的 NotebookLM 研究助手。
+NotebookLM 的任何操作都必须通过已提供的 MCP 工具真实执行，绝不能虚构 Notebook、来源或结果。
+不要请求、显示或复述 Cookie、Token、密码、Storage State 或内部错误堆栈。
+写操作必须使用用户明确指定或工具确认的 Notebook；不确定时先询问。
+工具失败时明确说明失败及安全的恢复建议。回答适合 Slack 阅读并保持简洁。"""
+
+
+class Streamer(Protocol):
+    def append(self, **kwargs: Any) -> Any: ...
+
+
+SENSITIVE_KEYS = {
+    "authorization",
+    "cookie",
+    "cookies",
+    "token",
+    "access_token",
+    "refresh_token",
+    "storage_state",
+    "password",
+}
+
+
+def _redact(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {
+            key: "[REDACTED]" if key.lower() in SENSITIVE_KEYS else _redact(item)
+            for key, item in value.items()
+        }
+    if isinstance(value, list):
+        return [_redact(item) for item in value]
+    return value
+
+
+def _safe_tool_output(result: dict[str, Any]) -> str:
+    encoded = json.dumps(_redact(result), ensure_ascii=False, default=str)
+    return encoded[:100_000]
+
+
+class AgentRuntime:
+    def __init__(
+        self,
+        mcp: MCPClient,
+        *,
+        api_key: str,
+        model: str = "gpt-4o-mini",
+        max_tool_rounds: int = 8,
+        llm: Any | None = None,
+    ):
+        self.mcp = mcp
+        self.model = model
+        self.max_tool_rounds = max_tool_rounds
+        self.llm = llm or openai.OpenAI(api_key=api_key)
+
+    def run(self, streamer: Streamer, prompts: ResponseInputParam) -> None:
+        tools = self.mcp.list_tools()
+        allowed = {tool.name: tool for tool in tools}
+        for round_number in range(self.max_tool_rounds + 1):
+            tool_calls = self._stream_once(streamer, prompts, tools)
+            if not tool_calls:
+                return
+            if round_number == self.max_tool_rounds:
+                raise RuntimeError("工具调用轮数超过安全上限")
+            for call in tool_calls:
+                self._execute_call(streamer, prompts, allowed, call)
+
+    def _stream_once(
+        self,
+        streamer: Streamer,
+        prompts: ResponseInputParam,
+        tools: list[ToolDefinition],
+    ) -> list[Any]:
+        calls = []
+        response = self.llm.responses.create(
+            model=self.model,
+            instructions=SYSTEM_PROMPT,
+            input=prompts,
+            tools=[tool.as_openai_tool() for tool in tools],
+            stream=True,
+        )
+        for event in response:
+            if event.type == "response.output_text.delta":
+                streamer.append(markdown_text=str(event.delta))
+            elif (
+                event.type == "response.output_item.done"
+                and event.item.type == "function_call"
+            ):
+                calls.append(event.item)
+                streamer.append(
+                    chunks=[
+                        TaskUpdateChunk(
+                            id=event.item.call_id,
+                            title=f"正在执行 NotebookLM 工具：{event.item.name}",
+                            status="in_progress",
+                        )
+                    ]
+                )
+        return calls
+
+    def _execute_call(
+        self,
+        streamer: Streamer,
+        prompts: ResponseInputParam,
+        allowed: dict[str, ToolDefinition],
+        call: Any,
+    ) -> None:
+        prompts.append(
+            {
+                "id": call.id,
+                "call_id": call.call_id,
+                "type": "function_call",
+                "name": call.name,
+                "arguments": call.arguments,
+            }
+        )
+        try:
+            if call.name not in allowed:
+                raise MCPError("UNKNOWN_TOOL", "模型请求了未注册的工具")
+            arguments = json.loads(call.arguments)
+            if not isinstance(arguments, dict):
+                raise ValueError
+            result = self.mcp.call_tool(call.name, arguments)
+            output = _safe_tool_output(result)
+            status = "complete"
+            title = f"NotebookLM 工具已完成：{call.name}"
+        except (json.JSONDecodeError, ValueError):
+            output = json.dumps(
+                {"error": "INVALID_ARGUMENTS", "message": "工具参数无效"}
+            )
+            status = "error"
+            title = "NotebookLM 工具参数无效"
+        except MCPError as exc:
+            output = json.dumps(
+                {"error": exc.code, "message": str(exc)}, ensure_ascii=False
+            )
+            status = "error"
+            title = str(exc)
+        prompts.append(
+            {"type": "function_call_output", "call_id": call.call_id, "output": output}
+        )
+        streamer.append(
+            chunks=[TaskUpdateChunk(id=call.call_id, title=title, status=status)]
+        )
 
 
 def call_llm(
     streamer: ChatStream,
     prompts: ResponseInputParam,
-):
-    """
-    Stream an LLM response to prompts with an example dice rolling function
+    *,
+    runtime: AgentRuntime | None = None,
+) -> None:
+    (runtime or get_runtime()).run(streamer, prompts)
 
-    https://docs.slack.dev/tools/python-slack-sdk/web#sending-streaming-messages
-    https://platform.openai.com/docs/guides/text
-    https://platform.openai.com/docs/guides/streaming-responses
-    https://platform.openai.com/docs/guides/function-calling
-    """
-    llm = openai.OpenAI(
-        api_key=os.getenv("OPENAI_API_KEY"),
+
+@lru_cache(maxsize=1)
+def get_runtime() -> AgentRuntime:
+    settings = Settings.from_env()
+    settings.validate_bot()
+    mcp = MCPClient(
+        transport=settings.mcp_transport,
+        command=settings.mcp_command,
+        url=settings.mcp_url,
+        timeout=settings.mcp_timeout_seconds,
     )
-    tool_calls = []
-    response = llm.responses.create(
-        model="gpt-4o-mini",
-        input=prompts,
-        tools=[
-            roll_dice_definition,
-        ],
-        stream=True,
+    return AgentRuntime(
+        mcp,
+        api_key=settings.openai_api_key or "",
+        model=settings.openai_model,
+        max_tool_rounds=settings.max_tool_rounds,
     )
-    for event in response:
-        # Markdown text from the LLM response is streamed in chat as it arrives
-        if event.type == "response.output_text.delta":
-            streamer.append(markdown_text=f"{event.delta}")
-
-        # Function calls are saved for later computation and a new task is shown
-        if event.type == "response.output_item.done":
-            if event.item.type == "function_call":
-                tool_calls.append(event.item)
-                if event.item.name == "roll_dice":
-                    args = json.loads(event.item.arguments)
-                    streamer.append(
-                        chunks=[
-                            TaskUpdateChunk(
-                                id=f"{event.item.call_id}",
-                                title=f"Rolling a {args['count']}d{args['sides']}...",
-                                status="in_progress",
-                            ),
-                        ],
-                    )
-
-    # Tool calls are performed and tasks are marked as completed in Slack
-    if tool_calls:
-        for call in tool_calls:
-            if call.name == "roll_dice":
-                args = json.loads(call.arguments)
-                prompts.append(
-                    {
-                        "id": call.id,
-                        "call_id": call.call_id,
-                        "type": "function_call",
-                        "name": "roll_dice",
-                        "arguments": call.arguments,
-                    }
-                )
-                result = roll_dice(**args)
-                prompts.append(
-                    {
-                        "type": "function_call_output",
-                        "call_id": call.call_id,
-                        "output": json.dumps(result),
-                    }
-                )
-                if result.get("error") is not None:
-                    streamer.append(
-                        chunks=[
-                            TaskUpdateChunk(
-                                id=f"{call.call_id}",
-                                title=f"{result['error']}",
-                                status="error",
-                            ),
-                        ],
-                    )
-                else:
-                    streamer.append(
-                        chunks=[
-                            TaskUpdateChunk(
-                                id=f"{call.call_id}",
-                                title=f"{result['description']}",
-                                status="complete",
-                            ),
-                        ],
-                    )
-
-        # Complete the LLM response after making tool calls
-        call_llm(streamer, prompts)
