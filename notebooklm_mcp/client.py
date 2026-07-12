@@ -118,30 +118,67 @@ class _HTTPTransport:
         self.url = url
         self.client = httpx.Client(timeout=timeout)
         self._next_id = 0
+        self._session_id: str | None = None
+        self._initialized = False
 
     def close(self) -> None:
         self.client.close()
 
-    def request(self, method: str, params: dict[str, Any]) -> dict[str, Any]:
+    def _post(
+        self, method: str, params: dict[str, Any], *, notification: bool = False
+    ) -> dict[str, Any]:
         self._next_id += 1
+        payload: dict[str, Any] = {
+            "jsonrpc": "2.0",
+            "method": method,
+            "params": params,
+        }
+        if not notification:
+            payload["id"] = self._next_id
+        headers = {"Accept": "application/json, text/event-stream"}
+        if self._session_id:
+            headers["Mcp-Session-Id"] = self._session_id
         try:
             response = self.client.post(
                 self.url,
-                json={
-                    "jsonrpc": "2.0",
-                    "id": self._next_id,
-                    "method": method,
-                    "params": params,
-                },
-                headers={"Accept": "application/json, text/event-stream"},
+                json=payload,
+                headers=headers,
             )
             response.raise_for_status()
-            payload = response.json()
+            self._session_id = response.headers.get("Mcp-Session-Id", self._session_id)
+            if notification or not response.content:
+                return {}
+            if "text/event-stream" in response.headers.get("content-type", ""):
+                data = [
+                    line.removeprefix("data:").strip()
+                    for line in response.text.splitlines()
+                    if line.startswith("data:")
+                ]
+                response_payload = json.loads(data[-1])
+            else:
+                response_payload = response.json()
         except (httpx.HTTPError, ValueError) as exc:
             raise MCPError("MCP_UNAVAILABLE", "NotebookLM MCP 服务不可用") from exc
-        if "error" in payload:
+        if "error" in response_payload:
             raise MCPError("MCP_TOOL_ERROR", "NotebookLM 工具执行失败")
-        return payload.get("result", {})
+        return response_payload.get("result", {})
+
+    def request(self, method: str, params: dict[str, Any]) -> dict[str, Any]:
+        if not self._initialized:
+            self._post(
+                "initialize",
+                {
+                    "protocolVersion": "2025-06-18",
+                    "capabilities": {},
+                    "clientInfo": {
+                        "name": "notebooklm-slack-agent",
+                        "version": "0.1.0",
+                    },
+                },
+            )
+            self._post("notifications/initialized", {}, notification=True)
+            self._initialized = True
+        return self._post(method, params)
 
 
 class MCPClient:

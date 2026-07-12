@@ -11,7 +11,13 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self):
         size = int(self.headers["Content-Length"])
         request = json.loads(self.rfile.read(size))
-        if request["method"] == "tools/list":
+        if request["method"] == "initialize":
+            result = {
+                "protocolVersion": "2025-06-18",
+                "capabilities": {},
+                "serverInfo": {"name": "fake", "version": "1"},
+            }
+        elif request["method"] == "tools/list":
             result = {
                 "tools": [
                     {
@@ -24,8 +30,12 @@ class Handler(BaseHTTPRequestHandler):
                     }
                 ]
             }
-        else:
+        elif request["method"] == "tools/call":
             result = {"content": [{"type": "text", "text": "ok"}]}
+        else:
+            self.send_response(202)
+            self.end_headers()
+            return
         payload = json.dumps(
             {"jsonrpc": "2.0", "id": request["id"], "result": result}
         ).encode()
