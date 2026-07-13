@@ -1,0 +1,42 @@
+# Git and local editor state
+.git
+.gitignore
+.github
+.slack
+.idea
+.DS_Store
+
+# Local configuration and credentials
+.env
+.env.*
+!.env.sample
+.notebooklm
+.notebooklm/
+*.db
+*.sqlite
+*.sqlite3
+
+# Python caches, virtualenvs, and test artifacts
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.pytype/
+.cache/
+.coverage
+coverage.xml
+cov_*
+logs/
+htmlcov/
+.tox/
+env*/
+venv/
+.venv/
+.venv*/
+*.egg-info/
+build/
+dist/
+
+# Runtime scratch files
+tmp.txt
+compose.codex-*.yaml
