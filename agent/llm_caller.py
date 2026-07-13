@@ -9,11 +9,16 @@ from openai.types.responses import ResponseInputParam
 from slack_sdk.models.messages.chunk import TaskUpdateChunk
 from slack_sdk.web.chat_stream import ChatStream
 
-from notebooklm_mcp import MCPClient, MCPError, ToolDefinition
 from config import Settings
+from notebooklm_mcp import MCPError, ToolDefinition
+from notebooklm_tool import (
+    NotebookToolError,
+    NotebookToolProvider,
+    build_notebook_provider,
+)
 
 SYSTEM_PROMPT = """你是 Slack 中的 NotebookLM 研究助手。
-NotebookLM 的任何操作都必须通过已提供的 MCP 工具真实执行，绝不能虚构 Notebook、来源或结果。
+NotebookLM 的任何操作都必须通过已提供的内置 NotebookLM 工具真实执行，绝不能虚构 Notebook、来源或结果。
 不要请求、显示或复述 Cookie、Token、密码、Storage State 或内部错误堆栈。
 写操作必须使用用户明确指定或工具确认的 Notebook；不确定时先询问。
 工具失败时明确说明失败及安全的恢复建议。回答适合 Slack 阅读并保持简洁。"""
@@ -54,20 +59,21 @@ def _safe_tool_output(result: dict[str, Any]) -> str:
 class AgentRuntime:
     def __init__(
         self,
-        mcp: MCPClient,
+        notebook: NotebookToolProvider,
         *,
         api_key: str,
         model: str = "gpt-4o-mini",
         max_tool_rounds: int = 8,
         llm: Any | None = None,
     ):
-        self.mcp = mcp
+        self.notebook = notebook
+        self.mcp = notebook
         self.model = model
         self.max_tool_rounds = max_tool_rounds
         self.llm = llm or openai.OpenAI(api_key=api_key)
 
     def run(self, streamer: Streamer, prompts: ResponseInputParam) -> None:
-        tools = self.mcp.list_tools()
+        tools = self.notebook.list_tools()
         allowed = {tool.name: tool for tool in tools}
         for round_number in range(self.max_tool_rounds + 1):
             tool_calls = self._stream_once(streamer, prompts, tools)
@@ -129,11 +135,11 @@ class AgentRuntime:
         )
         try:
             if call.name not in allowed:
-                raise MCPError("UNKNOWN_TOOL", "模型请求了未注册的工具")
+                raise NotebookToolError("UNKNOWN_TOOL", "模型请求了未注册的工具")
             arguments = json.loads(call.arguments)
             if not isinstance(arguments, dict):
                 raise ValueError
-            result = self.mcp.call_tool(call.name, arguments)
+            result = self.notebook.call_tool(call.name, arguments)
             output = _safe_tool_output(result)
             status = "complete"
             title = f"NotebookLM 工具已完成：{call.name}"
@@ -143,7 +149,7 @@ class AgentRuntime:
             )
             status = "error"
             title = "NotebookLM 工具参数无效"
-        except MCPError as exc:
+        except (MCPError, NotebookToolError) as exc:
             output = json.dumps(
                 {"error": exc.code, "message": str(exc)}, ensure_ascii=False
             )
@@ -170,14 +176,9 @@ def call_llm(
 def get_runtime() -> AgentRuntime:
     settings = Settings.from_env()
     settings.validate_bot()
-    mcp = MCPClient(
-        transport=settings.mcp_transport,
-        command=settings.mcp_command,
-        url=settings.mcp_url,
-        timeout=settings.mcp_timeout_seconds,
-    )
+    notebook = build_notebook_provider(settings)
     return AgentRuntime(
-        mcp,
+        notebook,
         api_key=settings.openai_api_key or "",
         model=settings.openai_model,
         max_tool_rounds=settings.max_tool_rounds,

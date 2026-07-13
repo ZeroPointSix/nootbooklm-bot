@@ -7,11 +7,11 @@ from fastapi.responses import HTMLResponse, RedirectResponse
 from pydantic import BaseModel
 from slack_sdk import WebClient
 
-from agent.llm_caller import get_runtime
 from auth.browser import ExternalBrowserWorker
 from auth.sessions import LoginStatus
 from config import Settings
 from listeners.commands.notebook import get_profile_manager, get_session_store
+from notebooklm_tool import build_notebook_provider
 
 settings = Settings.from_env()
 app = FastAPI(
@@ -65,10 +65,9 @@ def complete_login(
 
     def verify(_path) -> bool:
         try:
-            runtime = get_runtime()
-            runtime.mcp.reconnect()
-            runtime.mcp.list_tools()
-            return True
+            notebook = build_notebook_provider(settings)
+            notebook.reconnect()
+            return bool(notebook.health().get("ready"))
         except Exception:
             return False
 
@@ -87,8 +86,8 @@ def complete_login(
             WebClient(token=settings.slack_bot_token).chat_postMessage(
                 channel=completed.slack_channel_id,
                 thread_ts=completed.slack_thread_ts,
-                text="NotebookLM 登录成功。默认账号现在可以使用。",
+                text="NotebookLM 登录验证通过。默认账号现在可以被内置工具读取。",
             )
         except Exception:
             pass
-    return {"status": "authenticated"}
+    return {"status": "authenticated", "backend": settings.notebooklm_backend}
