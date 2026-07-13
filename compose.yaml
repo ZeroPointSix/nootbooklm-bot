@@ -14,7 +14,7 @@ services:
     command: ["uvicorn", "auth_app:app", "--host", "0.0.0.0", "--port", "8080", "--no-access-log"]
     restart: unless-stopped
     ports:
-      - "127.0.0.1:8080:8080"
+      - "127.0.0.1:18082:8080"
     volumes:
       - notebooklm-profile:/data/notebooklm
     environment:

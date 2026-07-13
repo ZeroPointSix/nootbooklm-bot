@@ -2,7 +2,8 @@ slack-sdk==3.43.0
 slack-bolt==1.29.0
 slack-cli-hooks<1.0.0
 
-# If you use a different LLM vendor, replace this dependency
+# OpenAI-compatible client for Responses API tool calling.
+# Point LLM_API_URL at any compatible provider endpoint.
 openai==2.45.0
 
 pytest==9.1.1

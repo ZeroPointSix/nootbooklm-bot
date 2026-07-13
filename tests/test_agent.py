@@ -2,7 +2,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from agent.llm_caller import AgentRuntime, _safe_tool_output
+from agent.llm_caller import AgentRuntime, _llm_visible_tools, _safe_tool_output
 from notebooklm_mcp.client import ToolDefinition
 
 
@@ -87,3 +87,14 @@ def test_sensitive_mcp_result_fields_are_redacted_recursively():
     )
     assert "secret" not in output
     assert output.count("[REDACTED]") == 2
+
+
+def test_auth_management_tools_are_hidden_from_llm():
+    tools = [
+        ToolDefinition("get_health", "health", {"type": "object"}),
+        ToolDefinition("setup_auth", "auth", {"type": "object"}),
+        ToolDefinition("re_auth", "auth", {"type": "object"}),
+        ToolDefinition("cleanup_data", "cleanup", {"type": "object"}),
+        ToolDefinition("add_source", "source", {"type": "object"}),
+    ]
+    assert [tool.name for tool in _llm_visible_tools(tools)] == ["get_health", "add_source"]

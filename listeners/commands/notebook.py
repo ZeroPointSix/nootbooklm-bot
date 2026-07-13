@@ -1,15 +1,49 @@
 from __future__ import annotations
 
+import json
+from typing import Any
 from urllib.parse import quote
 
 from auth import ProfileManager, SQLiteLoginSessionStore
 from config import Settings
+from notebooklm_mcp import MCPError
+from notebooklm_mcp.shared import get_shared_mcp_client
 
 _settings = Settings.from_env()
 _sessions = SQLiteLoginSessionStore(
     _settings.auth_session_db_path, _settings.auth_session_ttl_seconds
 )
 _profiles = ProfileManager(_settings.profile_path)
+
+
+def _extract_health_payload(result: dict[str, Any]) -> dict[str, Any]:
+    data = result.get("data")
+    if isinstance(data, dict):
+        return data
+    for item in result.get("content", []):
+        if not isinstance(item, dict) or item.get("type") != "text":
+            continue
+        try:
+            parsed = json.loads(str(item.get("text", "")))
+        except json.JSONDecodeError:
+            continue
+        if isinstance(parsed, dict):
+            nested = parsed.get("data")
+            return nested if isinstance(nested, dict) else parsed
+    return {}
+
+
+def get_mcp_auth_status() -> tuple[bool | None, str | None]:
+    client = get_shared_mcp_client()
+    try:
+        tools = {tool.name for tool in client.list_tools()}
+        if "get_health" not in tools:
+            return None, "MCP 未提供 get_health 工具"
+        payload = _extract_health_payload(client.call_tool("get_health", {}))
+        authenticated = payload.get("authenticated")
+        return authenticated if isinstance(authenticated, bool) else None, None
+    except MCPError as exc:
+        return None, str(exc)
 
 
 def notebook_command(ack, command: dict, respond) -> None:
@@ -26,10 +60,18 @@ def notebook_command(ack, command: dict, respond) -> None:
         active = _sessions.active()
         if active:
             respond(f"NotebookLM 登录状态：{active.status.value}")
+            return
+        authenticated, error = get_mcp_auth_status()
+        if authenticated is True:
+            respond("NotebookLM 登录状态：在线验证通过（MCP authenticated=true）。")
+        elif authenticated is False:
+            respond("NotebookLM 登录状态：在线验证未通过（MCP authenticated=false）。请执行 /notebook login 重新登录。")
         elif _profiles.exists():
-            respond("NotebookLM 登录状态：已配置（尚未执行本次在线验证）")
+            suffix = f"：{error}" if error else "。"
+            respond(f"NotebookLM 登录状态：已保存本地登录态，但 MCP 在线验证失败{suffix}")
         else:
-            respond("NotebookLM 登录状态：未配置")
+            suffix = f"（MCP 在线验证失败：{error}）" if error else ""
+            respond(f"NotebookLM 登录状态：未配置{suffix}")
         return
     if action == "login" and len(parts) > 1 and parts[1].lower() == "cancel":
         session = _sessions.cancel_active()

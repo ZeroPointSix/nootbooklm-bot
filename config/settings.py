@@ -13,8 +13,9 @@ class ConfigurationError(ValueError):
 class Settings:
     slack_bot_token: str | None
     slack_app_token: str | None
-    openai_api_key: str | None
-    openai_model: str
+    llm_api_key: str | None
+    llm_api_url: str | None
+    llm_model: str
     mcp_transport: str
     mcp_command: tuple[str, ...]
     mcp_url: str | None
@@ -32,8 +33,10 @@ class Settings:
         return cls(
             slack_bot_token=os.getenv("SLACK_BOT_TOKEN"),
             slack_app_token=os.getenv("SLACK_APP_TOKEN"),
-            openai_api_key=os.getenv("OPENAI_API_KEY"),
-            openai_model=os.getenv("OPENAI_MODEL", "gpt-4o-mini"),
+            llm_api_key=os.getenv("LLM_API_KEY") or os.getenv("OPENAI_API_KEY"),
+            llm_api_url=os.getenv("LLM_API_URL") or os.getenv("OPENAI_BASE_URL"),
+            llm_model=os.getenv("LLM_MODEL")
+            or os.getenv("OPENAI_MODEL", "gpt-4o-mini"),
             mcp_transport=os.getenv("NOTEBOOKLM_MCP_TRANSPORT", "stdio"),
             mcp_command=tuple(
                 shlex.split(os.getenv("NOTEBOOKLM_MCP_COMMAND", "notebooklm-mcp"))
@@ -62,7 +65,7 @@ class Settings:
             for name, value in (
                 ("SLACK_BOT_TOKEN", self.slack_bot_token),
                 ("SLACK_APP_TOKEN", self.slack_app_token),
-                ("OPENAI_API_KEY", self.openai_api_key),
+                ("LLM_API_KEY", self.llm_api_key),
             )
             if not value
         ]

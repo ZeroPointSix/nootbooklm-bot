@@ -20,8 +20,9 @@ Storage State 当作完整凭据保护。
 ## 快速开始
 
 要求 Python 3.11+。创建虚拟环境，安装 requirements.txt，复制 .env.sample
-为 .env，并至少配置 Slack Bot token、Slack App token、OpenAI API key 和
-NotebookLM MCP 传输。把 manifest.json 导入 Slack App 后运行 python app.py。
+为 .env，并至少配置 Slack Bot token、Slack App token、LLM API key（以及可选的
+LLM API URL / model）和 NotebookLM MCP 传输。把 manifest.json 导入 Slack App
+后运行 python app.py。
 
 HTTP MCP 需要设置 NOTEBOOKLM_MCP_TRANSPORT=http 和 NOTEBOOKLM_MCP_URL。
 stdio MCP 使用 NOTEBOOKLM_MCP_COMMAND。

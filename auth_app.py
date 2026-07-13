@@ -7,7 +7,6 @@ from fastapi.responses import HTMLResponse, RedirectResponse
 from pydantic import BaseModel
 from slack_sdk import WebClient
 
-from agent.llm_caller import get_runtime
 from auth.browser import ExternalBrowserWorker
 from auth.sessions import LoginStatus
 from config import Settings
@@ -63,31 +62,25 @@ def complete_login(
     if not session or session.status != LoginStatus.BROWSER_STARTED:
         raise HTTPException(status_code=409, detail="登录会话状态无效")
 
-    def verify(_path) -> bool:
-        try:
-            runtime = get_runtime()
-            runtime.mcp.reconnect()
-            runtime.mcp.list_tools()
-            return True
-        except Exception:
-            return False
+    def accept_storage_state(_path) -> bool:
+        return True
 
     try:
-        get_profile_manager().install(request.storage_state, verify=verify)
+        get_profile_manager().install(request.storage_state, verify=accept_storage_state)
         completed = get_session_store().transition(
             request.session_id, LoginStatus.AUTHENTICATED
         )
     except Exception as exc:
         get_session_store().transition(
-            request.session_id, LoginStatus.FAILED, "AUTH_VERIFICATION_FAILED"
+            request.session_id, LoginStatus.FAILED, "AUTH_SAVE_FAILED"
         )
-        raise HTTPException(status_code=422, detail="认证验证失败") from exc
+        raise HTTPException(status_code=422, detail="认证保存失败") from exc
     if settings.slack_bot_token:
         try:
             WebClient(token=settings.slack_bot_token).chat_postMessage(
                 channel=completed.slack_channel_id,
                 thread_ts=completed.slack_thread_ts,
-                text="NotebookLM 登录成功。默认账号现在可以使用。",
+                text="NotebookLM 登录态已保存。请执行 /notebook status 查看 MCP 在线验证结果；只有在线验证通过后才表示可以使用。",
             )
         except Exception:
             pass
