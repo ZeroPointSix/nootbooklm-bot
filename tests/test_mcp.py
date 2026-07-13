@@ -75,3 +75,11 @@ def test_http_failure_is_safely_normalized():
     with pytest.raises(MCPError, match="不可用") as caught:
         client.list_tools()
     assert "127.0.0.1" not in str(caught.value)
+
+
+def test_http_transport_does_not_inherit_environment_proxy(mcp_server, monkeypatch):
+    monkeypatch.setenv("HTTP_PROXY", "socks5h://127.0.0.1:1")
+    monkeypatch.setenv("HTTPS_PROXY", "socks5h://127.0.0.1:1")
+    client = MCPClient(transport="http", url=mcp_server, timeout=2)
+    assert client.list_tools()[0].name == "notebook_list"
+    client.close()

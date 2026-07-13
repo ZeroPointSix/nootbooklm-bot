@@ -116,7 +116,11 @@ class _StdioTransport:
 class _HTTPTransport:
     def __init__(self, url: str, timeout: float):
         self.url = url
-        self.client = httpx.Client(timeout=timeout)
+        # MCP endpoints are deployment-controlled service endpoints. Inheriting
+        # HTTP(S)_PROXY here can unexpectedly route credentials and tool data
+        # through a workstation/container proxy, and can also break loopback
+        # connections when optional SOCKS support is absent.
+        self.client = httpx.Client(timeout=timeout, trust_env=False)
         self._next_id = 0
         self._session_id: str | None = None
         self._initialized = False
