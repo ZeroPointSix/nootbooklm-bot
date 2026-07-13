@@ -10,10 +10,10 @@ from slack_sdk.models.messages.chunk import TaskUpdateChunk
 from slack_sdk.web.chat_stream import ChatStream
 
 from config import Settings
-from notebooklm_mcp import MCPError, ToolDefinition
 from notebooklm_tool import (
     NotebookToolError,
     NotebookToolProvider,
+    ToolDefinition,
     build_notebook_provider,
 )
 
@@ -67,7 +67,6 @@ class AgentRuntime:
         llm: Any | None = None,
     ):
         self.notebook = notebook
-        self.mcp = notebook
         self.model = model
         self.max_tool_rounds = max_tool_rounds
         self.llm = llm or openai.OpenAI(api_key=api_key)
@@ -149,7 +148,7 @@ class AgentRuntime:
             )
             status = "error"
             title = "NotebookLM 工具参数无效"
-        except (MCPError, NotebookToolError) as exc:
+        except NotebookToolError as exc:
             output = json.dumps(
                 {"error": exc.code, "message": str(exc)}, ensure_ascii=False
             )

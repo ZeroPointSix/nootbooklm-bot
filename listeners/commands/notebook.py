@@ -69,7 +69,7 @@ def _status_text() -> str:
         health = build_notebook_provider(_settings).health()
     except Exception as exc:
         health = {
-            "backend": _settings.notebooklm_backend,
+            "backend": "native",
             "ready": False,
             "summary": "NotebookLM 健全检查失败",
             "checks": [

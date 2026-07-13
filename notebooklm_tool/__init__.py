@@ -1,15 +1,15 @@
 from notebooklm_tool.provider import (
     LocalNotebookToolProvider,
-    McpNotebookToolProvider,
     NotebookToolError,
     NotebookToolProvider,
+    ToolDefinition,
     build_notebook_provider,
 )
 
 __all__ = [
     "LocalNotebookToolProvider",
-    "McpNotebookToolProvider",
     "NotebookToolError",
     "NotebookToolProvider",
+    "ToolDefinition",
     "build_notebook_provider",
 ]

@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import os
-import shlex
 from dataclasses import dataclass
 
 
@@ -15,11 +14,6 @@ class Settings:
     slack_app_token: str | None
     openai_api_key: str | None
     openai_model: str
-    notebooklm_backend: str
-    mcp_transport: str
-    mcp_command: tuple[str, ...]
-    mcp_url: str | None
-    mcp_timeout_seconds: float
     max_tool_rounds: int
     auth_base_url: str | None
     auth_session_ttl_seconds: int
@@ -35,15 +29,6 @@ class Settings:
             slack_app_token=os.getenv("SLACK_APP_TOKEN"),
             openai_api_key=os.getenv("OPENAI_API_KEY"),
             openai_model=os.getenv("OPENAI_MODEL", "gpt-4o-mini"),
-            notebooklm_backend=os.getenv("NOTEBOOKLM_BACKEND", "local").strip().lower(),
-            mcp_transport=os.getenv("NOTEBOOKLM_MCP_TRANSPORT", "stdio"),
-            mcp_command=tuple(
-                shlex.split(os.getenv("NOTEBOOKLM_MCP_COMMAND", "notebooklm-mcp"))
-            ),
-            mcp_url=os.getenv("NOTEBOOKLM_MCP_URL"),
-            mcp_timeout_seconds=float(
-                os.getenv("NOTEBOOKLM_MCP_TIMEOUT_SECONDS", "30")
-            ),
             max_tool_rounds=int(os.getenv("AGENT_MAX_TOOL_ROUNDS", "8")),
             auth_base_url=os.getenv("AUTH_BASE_URL"),
             auth_session_ttl_seconds=int(os.getenv("AUTH_SESSION_TTL_SECONDS", "600")),
@@ -70,7 +55,6 @@ class Settings:
         ]
         if missing:
             raise ConfigurationError(f"缺少必需配置：{', '.join(missing)}")
-        self._validate_notebook_backend()
         if not 1 <= self.max_tool_rounds <= 32:
             raise ConfigurationError("AGENT_MAX_TOOL_ROUNDS 必须在 1 到 32 之间")
 
@@ -86,16 +70,3 @@ class Settings:
             raise ConfigurationError("AUTH_BROWSER_VIEWER_URL 必须是 HTTPS URL")
         if not 60 <= self.auth_session_ttl_seconds <= 3600:
             raise ConfigurationError("AUTH_SESSION_TTL_SECONDS 必须在 60 到 3600 之间")
-        self._validate_notebook_backend()
-
-    def _validate_notebook_backend(self) -> None:
-        if self.notebooklm_backend not in {"local", "mcp"}:
-            raise ConfigurationError("NOTEBOOKLM_BACKEND 必须是 local 或 mcp")
-        if self.notebooklm_backend != "mcp":
-            return
-        if self.mcp_transport not in {"stdio", "http"}:
-            raise ConfigurationError("NOTEBOOKLM_MCP_TRANSPORT 必须是 stdio 或 http")
-        if self.mcp_transport == "stdio" and not self.mcp_command:
-            raise ConfigurationError("stdio 模式需要 NOTEBOOKLM_MCP_COMMAND")
-        if self.mcp_transport == "http" and not self.mcp_url:
-            raise ConfigurationError("http 模式需要 NOTEBOOKLM_MCP_URL")

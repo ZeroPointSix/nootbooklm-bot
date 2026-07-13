@@ -10,33 +10,21 @@ def test_bot_validation_rejects_missing_secrets(monkeypatch):
         Settings.from_env().validate_bot()
 
 
-def test_bot_validation_rejects_invalid_notebook_backend(monkeypatch):
+def test_bot_validation_has_no_backend_switch(monkeypatch):
     monkeypatch.setenv("SLACK_BOT_TOKEN", "xoxb-test")
     monkeypatch.setenv("SLACK_APP_TOKEN", "xapp-test")
     monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
-    monkeypatch.setenv("NOTEBOOKLM_BACKEND", "unknown")
-    with pytest.raises(ConfigurationError, match="NOTEBOOKLM_BACKEND"):
-        Settings.from_env().validate_bot()
+    settings = Settings.from_env()
+    settings.validate_bot()
+    assert not hasattr(settings, "notebooklm_backend")
 
 
-def test_local_backend_does_not_require_mcp_url(monkeypatch):
+def test_bot_validation_rejects_invalid_tool_rounds(monkeypatch):
     monkeypatch.setenv("SLACK_BOT_TOKEN", "xoxb-test")
     monkeypatch.setenv("SLACK_APP_TOKEN", "xapp-test")
     monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
-    monkeypatch.setenv("NOTEBOOKLM_BACKEND", "local")
-    monkeypatch.setenv("NOTEBOOKLM_MCP_TRANSPORT", "http")
-    monkeypatch.delenv("NOTEBOOKLM_MCP_URL", raising=False)
-    Settings.from_env().validate_bot()
-
-
-def test_mcp_backend_requires_mcp_url(monkeypatch):
-    monkeypatch.setenv("SLACK_BOT_TOKEN", "xoxb-test")
-    monkeypatch.setenv("SLACK_APP_TOKEN", "xapp-test")
-    monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
-    monkeypatch.setenv("NOTEBOOKLM_BACKEND", "mcp")
-    monkeypatch.setenv("NOTEBOOKLM_MCP_TRANSPORT", "http")
-    monkeypatch.delenv("NOTEBOOKLM_MCP_URL", raising=False)
-    with pytest.raises(ConfigurationError, match="NOTEBOOKLM_MCP_URL"):
+    monkeypatch.setenv("AGENT_MAX_TOOL_ROUNDS", "33")
+    with pytest.raises(ConfigurationError, match="AGENT_MAX_TOOL_ROUNDS"):
         Settings.from_env().validate_bot()
 
 

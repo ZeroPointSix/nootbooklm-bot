@@ -3,7 +3,7 @@ from types import SimpleNamespace
 import pytest
 
 from agent.llm_caller import AgentRuntime, _safe_tool_output
-from notebooklm_mcp.client import ToolDefinition
+from notebooklm_tool import ToolDefinition
 
 
 class Streamer:
@@ -14,7 +14,7 @@ class Streamer:
         self.items.append(kwargs)
 
 
-class MCP:
+class Provider:
     def __init__(self):
         self.calls = []
 
@@ -46,32 +46,35 @@ class Responses:
 
 
 def runtime(rounds, max_rounds=8):
-    mcp = MCP()
+    provider = Provider()
     llm = SimpleNamespace(responses=Responses(rounds))
-    return AgentRuntime(mcp, api_key="test", llm=llm, max_tool_rounds=max_rounds), mcp
+    return (
+        AgentRuntime(provider, api_key="test", llm=llm, max_tool_rounds=max_rounds),
+        provider,
+    )
 
 
 def test_dynamic_tool_call_is_forwarded_and_result_returned_to_model():
-    rt, mcp = runtime([[event_call()], []])
+    rt, provider = runtime([[event_call()], []])
     prompts = [{"role": "user", "content": "列出 notebooks"}]
     rt.run(Streamer(), prompts)
-    assert mcp.calls == [("notebook_list", {})]
+    assert provider.calls == [("notebook_list", {})]
     assert prompts[-1]["type"] == "function_call_output"
 
 
 def test_unknown_tool_is_not_forwarded():
-    rt, mcp = runtime([[event_call("delete_everything")], []])
+    rt, provider = runtime([[event_call("delete_everything")], []])
     prompts = []
     rt.run(Streamer(), prompts)
-    assert mcp.calls == []
+    assert provider.calls == []
     assert "UNKNOWN_TOOL" in prompts[-1]["output"]
 
 
 def test_invalid_json_is_not_forwarded():
-    rt, mcp = runtime([[event_call(arguments="{bad")], []])
+    rt, provider = runtime([[event_call(arguments="{bad")], []])
     prompts = []
     rt.run(Streamer(), prompts)
-    assert mcp.calls == []
+    assert provider.calls == []
     assert "INVALID_ARGUMENTS" in prompts[-1]["output"]
 
 
@@ -81,7 +84,7 @@ def test_tool_loop_is_bounded():
         rt.run(Streamer(), [])
 
 
-def test_sensitive_mcp_result_fields_are_redacted_recursively():
+def test_sensitive_tool_result_fields_are_redacted_recursively():
     output = _safe_tool_output(
         {"data": {"cookie": "secret", "safe": "ok"}, "access_token": "secret"}
     )

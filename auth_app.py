@@ -90,4 +90,4 @@ def complete_login(
             )
         except Exception:
             pass
-    return {"status": "authenticated", "backend": settings.notebooklm_backend}
+    return {"status": "authenticated", "backend": "native"}
