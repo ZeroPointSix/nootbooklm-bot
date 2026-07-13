@@ -1,6 +1,7 @@
 name: Merge updates to dependencies
-on:
+"on":
   pull_request:
+    branches: [main]
 jobs:
   dependabot:
     name: "@dependabot"
