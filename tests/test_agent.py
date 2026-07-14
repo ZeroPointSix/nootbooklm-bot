@@ -2,7 +2,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from agent.llm_caller import AgentRuntime, _safe_tool_output
+from agent.llm_caller import AgentRuntime, _safe_tool_output, format_error_message
 from notebooklm_tool import ToolDefinition
 
 
@@ -26,60 +26,88 @@ class Provider:
         return {"content": [{"type": "text", "text": "notebooks"}]}
 
 
-def event_call(name="notebook_list", arguments="{}"):
-    item = SimpleNamespace(
-        type="function_call",
-        id="item1",
-        call_id="call1",
-        name=name,
-        arguments=arguments,
+def chunk_text(text):
+    return SimpleNamespace(
+        choices=[SimpleNamespace(delta=SimpleNamespace(content=text, tool_calls=None))]
     )
-    return SimpleNamespace(type="response.output_item.done", item=item)
 
 
-class Responses:
+def chunk_call(name="notebook_list", arguments="{}"):
+    return SimpleNamespace(
+        choices=[
+            SimpleNamespace(
+                delta=SimpleNamespace(
+                    content=None,
+                    tool_calls=[
+                        SimpleNamespace(
+                            index=0,
+                            id="call1",
+                            function=SimpleNamespace(name=name, arguments=arguments),
+                        )
+                    ],
+                )
+            )
+        ]
+    )
+
+
+class Completions:
     def __init__(self, rounds):
         self.rounds = iter(rounds)
+        self.requests = []
 
-    def create(self, **_kwargs):
+    def create(self, **kwargs):
+        self.requests.append(kwargs)
         return next(self.rounds)
 
 
 def runtime(rounds, max_rounds=8):
     provider = Provider()
-    llm = SimpleNamespace(responses=Responses(rounds))
+    completions = Completions(rounds)
+    llm = SimpleNamespace(chat=SimpleNamespace(completions=completions))
     return (
         AgentRuntime(provider, api_key="test", llm=llm, max_tool_rounds=max_rounds),
         provider,
+        completions,
     )
 
 
-def test_dynamic_tool_call_is_forwarded_and_result_returned_to_model():
-    rt, provider = runtime([[event_call()], []])
+def test_chat_completion_tool_call_is_forwarded_and_result_returned_to_model():
+    rt, provider, completions = runtime([[chunk_call()], []])
     prompts = [{"role": "user", "content": "列出 notebooks"}]
     rt.run(Streamer(), prompts)
     assert provider.calls == [("notebook_list", {})]
-    assert prompts[-1]["type"] == "function_call_output"
+    assert completions.requests[0]["tools"][0]["function"]["name"] == "notebook_list"
+    assert prompts[-1]["role"] == "tool"
+    assert prompts[-1]["tool_call_id"] == "call1"
+
+
+def test_chat_completion_text_delta_is_streamed():
+    rt, provider, _ = runtime([[chunk_text("OK")]])
+    streamer = Streamer()
+    rt.run(streamer, [{"role": "user", "content": "hi"}])
+    assert provider.calls == []
+    assert streamer.items == [{"markdown_text": "OK"}]
 
 
 def test_unknown_tool_is_not_forwarded():
-    rt, provider = runtime([[event_call("delete_everything")], []])
+    rt, provider, _ = runtime([[chunk_call("delete_everything")], []])
     prompts = []
     rt.run(Streamer(), prompts)
     assert provider.calls == []
-    assert "UNKNOWN_TOOL" in prompts[-1]["output"]
+    assert "UNKNOWN_TOOL" in prompts[-1]["content"]
 
 
 def test_invalid_json_is_not_forwarded():
-    rt, provider = runtime([[event_call(arguments="{bad")], []])
+    rt, provider, _ = runtime([[chunk_call(arguments="{bad")], []])
     prompts = []
     rt.run(Streamer(), prompts)
     assert provider.calls == []
-    assert "INVALID_ARGUMENTS" in prompts[-1]["output"]
+    assert "INVALID_ARGUMENTS" in prompts[-1]["content"]
 
 
 def test_tool_loop_is_bounded():
-    rt, _ = runtime([[event_call()], [event_call()]], max_rounds=1)
+    rt, _, _ = runtime([[chunk_call()], [chunk_call()]], max_rounds=1)
     with pytest.raises(RuntimeError, match="安全上限"):
         rt.run(Streamer(), [])
 
@@ -90,3 +118,9 @@ def test_sensitive_tool_result_fields_are_redacted_recursively():
     )
     assert "secret" not in output
     assert output.count("[REDACTED]") == 2
+
+
+def test_error_message_shows_distinct_code_and_action():
+    message = format_error_message(RuntimeError("工具调用轮数超过安全上限"))
+    assert "AGENT_RUNTIME_ERROR" in message
+    assert "建议动作" in message

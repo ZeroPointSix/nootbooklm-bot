@@ -1,10 +1,9 @@
 from logging import Logger
 
-from openai.types.responses import ResponseInputParam
 from slack_bolt import Say
 from slack_sdk import WebClient
 
-from agent.llm_caller import call_llm
+from agent.llm_caller import call_llm, format_error_message
 from listeners.views.feedback_block import create_feedback_block
 
 
@@ -39,7 +38,7 @@ def app_mentioned_callback(client: WebClient, event: dict, logger: Logger, say: 
             recipient_user_id=user_id,
             thread_ts=thread_ts,
         )
-        prompts: ResponseInputParam = [
+        prompts: list[dict] = [
             {
                 "role": "user",
                 "content": text,
@@ -51,6 +50,6 @@ def app_mentioned_callback(client: WebClient, event: dict, logger: Logger, say: 
         streamer.stop(
             blocks=feedback_block,
         )
-    except Exception:
+    except Exception as exc:
         logger.exception("处理 app_mention 失败")
-        say(":warning: NotebookLM 请求失败，请稍后重试或执行 /notebook status。")
+        say(format_error_message(exc))
