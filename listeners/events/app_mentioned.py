@@ -1,10 +1,9 @@
 from logging import Logger
 
-from openai.types.responses import ResponseInputParam
 from slack_bolt import Say
 from slack_sdk import WebClient
 
-from agent.llm_caller import call_llm
+from agent.llm_caller import call_llm, format_error_message
 from listeners.views.feedback_block import create_feedback_block
 
 
@@ -30,13 +29,7 @@ def app_mentioned_callback(client: WebClient, event: dict, logger: Logger, say: 
             channel_id=channel_id,
             thread_ts=thread_ts,
             status="thinking...",
-            loading_messages=[
-                "Teaching the hamsters to type faster…",
-                "Untangling the internet cables…",
-                "Consulting the office goldfish…",
-                "Polishing up the response just for you…",
-                "Convincing the AI to stop overthinking…",
-            ],
+            loading_messages=["正在连接 NotebookLM…", "正在整理研究资料…"],
         )
 
         streamer = client.chat_stream(
@@ -45,7 +38,7 @@ def app_mentioned_callback(client: WebClient, event: dict, logger: Logger, say: 
             recipient_user_id=user_id,
             thread_ts=thread_ts,
         )
-        prompts: ResponseInputParam = [
+        prompts: list[dict] = [
             {
                 "role": "user",
                 "content": text,
@@ -57,6 +50,6 @@ def app_mentioned_callback(client: WebClient, event: dict, logger: Logger, say: 
         streamer.stop(
             blocks=feedback_block,
         )
-    except Exception as e:
-        logger.exception(f"Failed to handle a user message event: {e}")
-        say(f":warning: Something went wrong! ({e})")
+    except Exception as exc:
+        logger.exception("处理 app_mention 失败")
+        say(format_error_message(exc))

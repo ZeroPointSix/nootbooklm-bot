@@ -1,194 +1,67 @@
-# AI Agent App Template (Bolt for Python)
+# NotebookLM Slack Agent
 
-This Bolt for Python template demonstrates how to build [AI Apps](https://docs.slack.dev/ai/) in Slack, using models from [OpenAI](https://openai.com).
+这是一个基于 Slack Bolt 的个人研究 Agent。当前主线把 NotebookLM 收敛成仓库内置 tool provider：Slack bot、登录服务和 `/notebook status` 都只依赖同一个 `NotebookToolProvider` 接口，模型只能调用本仓库实现的 NotebookLM 工具。
 
-## App overview
+注意：NotebookLM 没有用于本场景的正式公开 API/OAuth。请使用专用 Google 账号，并把 Storage State 当作完整凭据保护。
 
-Setting up this app can provide you with an AI agent that enables the following flow:
+## 能力
 
-* Users open the assistant side panel in Slack and see suggested prompts.
-* The app calls OpenAI's API when a user selects a prompt or sends a message.
-* The app streams in its response, which can be a combination of text and tasks.
-* Users provide feedback via buttons.
+- Slack Assistant、私聊和 mention 自然语言研究
+- 内置 NotebookLM tool provider：`list_tools()` 暴露 35 个工具，`call_tool()` 在本仓库 handler 内执行
+- 通过 `notebooklm-py==0.8.0a3` 库模式调用 NotebookLM 核心能力
+- `/notebook login`、`status`、`logout`、`login cancel`
+- 一次性短时效登录链接、token 摘要、单活跃会话、跨进程 SQLite 状态
+- Storage State 格式验证、0600 权限、provider health 探针、原子替换和失败回滚
+- 独立 Bot/Auth 容器与持久化 Profile Volume
 
-## Setup
+## 快速开始
 
-Before getting started, make sure you have a development workspace where you have permissions to install apps. If you don’t have one setup, go ahead and [create one](https://slack.com/create).
+要求 Python 3.11+。创建虚拟环境，安装 requirements.txt，复制 .env.sample 为 .env，并至少配置 Slack Bot token、Slack App token、OpenAI API key。把 manifest.json 导入 Slack App 后运行 python app.py。
 
-### Developer Program
+NotebookLM 工具由内置 provider 承载：
 
-Join the [Slack Developer Program](https://api.slack.com/developer-program) for exclusive access to sandbox environments for building and testing your apps, tooling, and resources created to help you build and grow.
-
-## Installation
-
-Add this app to your workspace using either the Slack CLI or other development tooling, then read ahead to configuring LLM responses in the **[Providers](#providers)** section.
-
-<details><summary><strong>Using Slack CLI</strong></summary>
-
-Install the latest version of the Slack CLI for your operating system:
-
-- [Slack CLI for macOS & Linux](https://docs.slack.dev/tools/slack-cli/guides/installing-the-slack-cli-for-mac-and-linux/)
-- [Slack CLI for Windows](https://docs.slack.dev/tools/slack-cli/guides/installing-the-slack-cli-for-windows/)
-
-You'll also need to log in if this is your first time using the Slack CLI.
-
-```sh
-slack login
+```env
+NOTEBOOKLM_PROFILE_PATH=.notebooklm/profiles/default/storage_state.json
 ```
 
-#### Initializing the project
+## 登录服务
 
-```sh
-slack create my-bolt-python-assistant --template slack-samples/bolt-python-assistant-template
-cd my-bolt-python-assistant
-```
+登录不是 Google OAuth。`/notebook login` 创建一次性链接；Auth 服务消费链接后，跳转到运维方提供的隔离浏览器/noVNC Worker。Worker 完成 Google 页面登录后，把 Playwright Storage State 通过仅限内网的完成接口交给 Auth 服务。应用绝不创建用户名、密码或验证码表单。
 
-#### Creating the Slack app
+生产环境必须配置 AUTH_BASE_URL、AUTH_BROWSER_VIEWER_URL、至少 32 字符的 AUTH_INTERNAL_TOKEN、共享的 AUTH_SESSION_DB_PATH 和 NOTEBOOKLM_PROFILE_PATH。
 
-Use the following command to add your new Slack app to your development workspace. Choose a "local" app environment for upcoming development:
+登录完成后调用 provider health 证明成功。`/notebook status` 也走同一套健全逻辑，返回后端、摘要、profile/storage/google/notebooklm origin 和 `notebooks.list` 在线探针等分层检查结果。
 
-```sh
-slack install
-```
+反向代理必须满足：
 
-After the Slack app has been created you're all set to configure the LLM provider!
+- 对 /auth/notebooklm/* 禁用访问日志或脱敏路径，并强制 HTTPS；
+- 禁止缓存并保持 Referrer-Policy: no-referrer；
+- 只允许 Browser Worker 网络访问 /internal/*；
+- 不把 Auth 服务的 127.0.0.1:8080 直接暴露公网；
+- 登录结束后销毁临时浏览器 Profile 和 Viewer 会话。
 
-</details>
+ExternalBrowserWorker 是明确的部署边界。本仓库不内置永久公开的 noVNC，因为浏览器隔离、TLS、进程清理和网络 ACL 必须由部署环境保证。
 
-<details><summary><strong>Using Terminal</strong></summary>
+## 部署与验证
 
-#### Create Your Slack App
+推荐依次执行：
 
-1. Open [https://api.slack.com/apps/new](https://api.slack.com/apps/new) and choose "From an app manifest"
-2. Choose the workspace you want to install the application to
-3. Copy the contents of [manifest.json](./manifest.json) into the text box that says `*Paste your manifest code here*` (within the JSON tab) and click _Next_
-4. Review the configuration and click _Create_
-5. Click _Install to Workspace_ and _Allow_ on the screen that follows. You'll then be redirected to the App Configuration dashboard.
+1. ruff check .
+2. ruff format --check .
+3. pytest
+4. docker compose config
+5. docker build -t notebooklm-slack-agent:test .
+6. docker compose up -d
+7. curl http://127.0.0.1:8080/healthz
 
-#### Environment Variables
+测试覆盖 35 个工具发现、通用调用、未知工具、畸形参数、工具循环上限、上游失败、敏感字段脱敏、token 重放、过期、非法状态转换、跨进程会话、Profile 权限、认证失败回滚和内置 provider health。
 
-Before you can run the app, you'll need to store some environment variables.
+真实 Slack/Google/NotebookLM 端到端需要有效 Slack App、专用 Google 账号和 Browser Worker。Mock 通过不代表这些外部依赖已经通过。
 
-1. Rename `.env.sample` to `.env`.
-2. Open your apps setting page from [this list](https://api.slack.com/apps), click _OAuth & Permissions_ in the left hand menu, then copy the _Bot User OAuth Token_ into your `.env` file under `SLACK_BOT_TOKEN`.
+## 安全边界
 
-```sh
-SLACK_BOT_TOKEN=YOUR_SLACK_BOT_TOKEN
-```
-
-3. Click _Basic Information_ from the left hand menu and follow the steps in the _App-Level Tokens_ section to create an app-level token with the `connections:write` scope. Copy that token into your `.env` as `SLACK_APP_TOKEN`.
-
-```sh
-SLACK_APP_TOKEN=YOUR_SLACK_APP_TOKEN
-```
-
-#### Initializing the project
-
-```sh
-git clone https://github.com/slack-samples/bolt-python-assistant-template.git my-bolt-python-assistant
-cd my-bolt-python-assistant
-```
-
-#### Setup your python virtual environment
-
-```sh
-python3 -m venv .venv
-source .venv/bin/activate  # for Windows OS, .\.venv\Scripts\Activate instead should work
-```
-
-#### Install dependencies
-
-```sh
-pip install -r requirements.txt
-```
-
-</details>
-
-## Providers
-
-### OpenAI Setup
-
-Unlock the OpenAI models from your OpenAI account dashboard by clicking [create a new secret key](https://platform.openai.com/api-keys), then save your OpenAI key into the `.env` file as `OPENAI_API_KEY` like so:
-
-```zsh
-OPENAI_API_KEY=YOUR_OPEN_API_KEY
-```
-
-## Development
-
-### Starting the app
-
-#### Slack CLI
-
-```sh
-slack run
-```
-
-#### Terminal
-
-```sh
-python3 app.py
-```
-
-Start talking to the bot! Start a new DM or thread and click the feedback button when it responds.
-
-### Linting
-
-```sh
-# Run ruff check from root directory for linting
-ruff check
-
-# Run ruff format from root directory for code formatting
-ruff format
-```
-
-## Project Structure
-
-### `manifest.json`
-
-`manifest.json` is a configuration for Slack apps. With a manifest, you can create an app with a pre-defined configuration, or adjust the configuration of an existing app.
-
-### `app.py`
-
-`app.py` is the entry point for the application and is the file you'll run to start the server. This project aims to keep this file as thin as possible, primarily using it as a way to route inbound requests.
-
-### `/listeners`
-
-Every incoming request is routed to a "listener". This directory groups each listener based on the Slack Platform feature used, so `/listeners/events` handles incoming events, `/listeners/shortcuts` would handle incoming [Shortcuts](https://docs.slack.dev/interactivity/implementing-shortcuts/) requests, and so on.
-
-**`/listeners/assistant`**
-
-Configures the new Slack Assistant features, providing a dedicated side panel UI for users to interact with the AI chatbot. This module includes:
-
-- The `assistant_thread_started.py` file, which responds to new app threads with a list of suggested prompts.
-- The `message.py` file, which responds to user messages sent to app threads or from the **Chat** and **History** tab with an LLM generated response.
-
-### `/agent`
-
-The `llm_caller.py` file calls the OpenAI API and streams the generated response into a Slack conversation.
-
-The `tools` directory contains app-specific functions for the LLM to call.
-
-## App Distribution / OAuth
-
-Only implement OAuth if you plan to distribute your application across multiple workspaces. A separate `app_oauth.py` file can be found with relevant OAuth settings.
-
-When using OAuth, Slack requires a public URL where it can send requests. In this template app, we've used [`ngrok`](https://ngrok.com/download). Checkout [this guide](https://ngrok.com/docs#getting-started-expose) for setting it up.
-
-Start `ngrok` to access the app on an external network and create a redirect URL for OAuth.
-
-```
-ngrok http 3000
-```
-
-This output should include a forwarding address for `http` and `https` (we'll use `https`). It should look something like the following:
-
-```
-Forwarding   https://3cb89939.ngrok.io -> http://localhost:3000
-```
-
-Navigate to **OAuth & Permissions** in your app configuration and click **Add a Redirect URL**. The redirect URL should be set to your `ngrok` forwarding address with the `slack/oauth_redirect` path appended. For example:
-
-```
-https://3cb89939.ngrok.io/slack/oauth_redirect
-```
+- .env、.notebooklm、Cookie、Storage State 和 token 不得提交 Git。
+- 模型只能看到 provider 暴露的脱敏结果，不能读取 Profile 文件。
+- 工具名称必须来自当次 `list_tools()`；未知工具不会被转发。
+- NotebookLM 工具错误被归一化，不向 Slack 返回内部堆栈或端点。
+- 共享账号适合个人 Bot；多用户隔离不是当前版本的安全承诺。

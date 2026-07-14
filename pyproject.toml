@@ -1,13 +1,17 @@
 [project]
-name = "bolt-python-ai-agent-template"
-version = "0.1.0"
-requires-python = ">=3.9"
+name = "notebooklm-slack-agent"
+version = "0.3.3"
+requires-python = ">=3.11"
 dependencies = [
     "slack-sdk==3.43.0",
     "slack-bolt==1.29.0",
     "slack-cli-hooks<1.0.0",
     "openai==2.45.0",
+    "notebooklm-py==0.8.0a3",
     "python-dotenv==1.2.2",
+    "httpx>=0.28,<1",
+    "fastapi>=0.116,<1",
+    "uvicorn>=0.35,<1",
 ]
 
 [project.optional-dependencies]
@@ -17,7 +21,7 @@ dev = [
 ]
 
 [tool.setuptools.packages.find]
-include = ["agent*", "listeners*"]
+include = ["agent*", "auth*", "config*", "listeners*", "notebooklm_tool*"]
 
 [tool.ruff]
 [tool.ruff.lint]
