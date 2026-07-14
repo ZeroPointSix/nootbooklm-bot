@@ -1,12 +1,20 @@
 from __future__ import annotations
 
 import asyncio
+import base64
+import binascii
 import inspect
 import json
+import tempfile
 from dataclasses import asdict, dataclass, is_dataclass
 from pathlib import Path
 from typing import Any, Protocol
 from urllib.parse import parse_qs, urlparse
+
+
+DEFAULT_DRIVE_MIME_TYPE = "application/vnd.google-apps.document"
+SOURCE_UPLOAD_BYTES_B64_LIMIT = 10_000
+TOOL_CONTRACT = "notebooklm-py-0.8.0a3-35-tools"
 
 
 TOOL_NAMES = (
@@ -22,6 +30,8 @@ TOOL_NAMES = (
     "source_wait",
     "source_add",
     "source_add_and_wait",
+    "source_upload_bytes",
+    "source_add_drive_file",
     "chat_ask",
     "chat_configure",
     "suggest_prompts",
@@ -42,6 +52,7 @@ TOOL_NAMES = (
     "share_set_access",
     "share_set_user",
     "share_remove_user",
+    "server_info",
 )
 
 CONFIRMATION_TOOLS = {
@@ -79,6 +90,8 @@ class NotebookToolError(RuntimeError):
 
 
 class NotebookBackend(Protocol):
+    def probe(self) -> dict[str, Any]: ...
+
     def invoke(self, tool_name: str, arguments: dict[str, Any]) -> Any: ...
 
     def reconnect(self) -> None: ...
@@ -279,18 +292,21 @@ LOCAL_TOOLS = [
     ),
     ToolDefinition(
         "source_add",
-        "Add URLs, text, local files, or copied content to a NotebookLM notebook.",
+        "Add URLs, text, local files, Drive files, or copied content to a NotebookLM notebook.",
         _object_schema(
             {
                 "notebook": _notebook_ref(),
                 "source_type": _string(
-                    "Source type", enum=["url", "text", "file", "youtube", "audio"]
+                    "Source type",
+                    enum=["url", "text", "file", "drive", "youtube", "audio"],
                 ),
                 "url": _string("URL to add"),
                 "urls": _array("URLs to add", _string("URL")),
                 "text": _string("Text content to add"),
                 "texts": _array("Text blocks to add", _string("Text content")),
                 "path": _string("Local file path"),
+                "document_id": _string("Google Drive file ID"),
+                "mime_type": _string("Source MIME type"),
                 "title": _string("Optional source title"),
                 "allow_internal": _boolean("Allow internal or non-public URLs"),
             },
@@ -304,15 +320,52 @@ LOCAL_TOOLS = [
             {
                 "notebook": _notebook_ref(),
                 "source_type": _string(
-                    "Source type", enum=["url", "text", "file", "youtube", "audio"]
+                    "Source type",
+                    enum=["url", "text", "file", "drive", "youtube", "audio"],
                 ),
                 "url": _string("URL to add"),
                 "text": _string("Text content to add"),
                 "path": _string("Local file path"),
+                "document_id": _string("Google Drive file ID"),
+                "mime_type": _string("Source MIME type"),
                 "title": _string("Optional source title"),
                 "allow_internal": _boolean("Allow internal or non-public URLs"),
                 "timeout": _number("Maximum seconds to wait", minimum=1),
                 "interval": _number("Polling interval in seconds", minimum=0.1),
+            },
+            required=("notebook",),
+        ),
+    ),
+    ToolDefinition(
+        "source_upload_bytes",
+        "Add a small file to a NotebookLM notebook from base64-encoded bytes.",
+        _object_schema(
+            {
+                "notebook": _notebook_ref(),
+                "bytes_base64": _string(
+                    "Standard base64 file payload, max 10000 chars"
+                ),
+                "filename": _string(
+                    "Original file name used for extension and default title"
+                ),
+                "mime_type": _string("Optional MIME type"),
+                "title": _string("Optional source title"),
+            },
+            required=("notebook", "bytes_base64"),
+        ),
+    ),
+    ToolDefinition(
+        "source_add_drive_file",
+        "Add a Google Drive file to a NotebookLM notebook as a source.",
+        _object_schema(
+            {
+                "notebook": _notebook_ref(),
+                "document_id": _string("Google Drive file ID"),
+                "file_id": _string("Google Drive file ID alias"),
+                "title": _string("Drive file title"),
+                "mime_type": _string("Drive MIME type"),
+                "wait": _boolean("Wait for source processing"),
+                "timeout": _number("Maximum seconds to wait", minimum=1),
             },
             required=("notebook",),
         ),
@@ -559,6 +612,13 @@ LOCAL_TOOLS = [
             required=("notebook", "email"),
         ),
     ),
+    ToolDefinition(
+        "server_info",
+        "Report the built-in NotebookLM provider version, tool contract, and auth health.",
+        _object_schema(
+            {"include_account": _boolean("Include live account details when available")}
+        ),
+    ),
 ]
 
 
@@ -607,6 +667,16 @@ class SDKNotebookLMBackend:
     def reconnect(self) -> None:
         return None
 
+    def probe(self) -> dict[str, Any]:
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            return asyncio.run(self._probe_async())
+        raise NotebookToolError(
+            "NOTEBOOKLM_RUNTIME_UNSUPPORTED",
+            "NotebookLM health 当前在同步运行时执行；请在非事件循环线程中调用。",
+        )
+
     def invoke(self, tool_name: str, arguments: dict[str, Any]) -> Any:
         try:
             asyncio.get_running_loop()
@@ -618,6 +688,14 @@ class SDKNotebookLMBackend:
         )
 
     async def _invoke_async(self, tool_name: str, arguments: dict[str, Any]) -> Any:
+        return await self._with_client(
+            lambda client: self._dispatch(client, tool_name, arguments)
+        )
+
+    async def _probe_async(self) -> dict[str, Any]:
+        return await self._with_client(self._probe_client)
+
+    async def _with_client(self, callback: Any) -> Any:
         try:
             from notebooklm import NotebookLMClient
         except ImportError as exc:
@@ -636,11 +714,19 @@ class SDKNotebookLMBackend:
         context = await _maybe_await(factory(str(self.profile_path)))
         if hasattr(context, "__aenter__"):
             async with context as client:
-                return await self._dispatch(client, tool_name, arguments)
+                return await _maybe_await(callback(client))
         if hasattr(context, "__enter__"):
             with context as client:
-                return await self._dispatch(client, tool_name, arguments)
-        return await self._dispatch(context, tool_name, arguments)
+                return await _maybe_await(callback(client))
+        return await _maybe_await(callback(context))
+
+    async def _probe_client(self, client: Any) -> dict[str, Any]:
+        notebooks = list(await client.notebooks.list())
+        return {
+            "ok": True,
+            "probe": "notebooks.list",
+            "notebook_count": len(notebooks),
+        }
 
     async def _dispatch(
         self, client: Any, tool_name: str, arguments: dict[str, Any]
@@ -700,6 +786,10 @@ class SDKNotebookLMBackend:
                 return await self._source_add(client, args, wait=False)
             case "source_add_and_wait":
                 return await self._source_add(client, args, wait=True)
+            case "source_upload_bytes":
+                return await self._source_upload_bytes(client, args)
+            case "source_add_drive_file":
+                return await self._source_add_drive_file(client, args)
             case "chat_ask":
                 return await self._chat_ask(client, args)
             case "chat_configure":
@@ -798,6 +888,8 @@ class SDKNotebookLMBackend:
                     "notebook_id": notebook_id,
                     "email": args["email"],
                 }
+            case "server_info":
+                return await self._server_info(client, args)
         raise NotebookToolError("UNKNOWN_TOOL", f"未实现工具：{tool_name}")
 
     async def _source_list(self, client: Any, args: dict[str, Any]) -> dict[str, Any]:
@@ -888,12 +980,90 @@ class SDKNotebookLMBackend:
                     title=args.get("title"),
                 )
             )
+        if args.get("document_id") or args.get("file_id"):
+            added.append(
+                await self._add_drive_file(client, notebook_id, args, wait=wait)
+            )
         if not added:
             raise NotebookToolError(
                 "NOTEBOOKLM_ARGUMENTS",
-                "source_add 需要提供 url、urls、text、texts 或 path。",
+                "source_add 需要提供 url、urls、text、texts、path 或 document_id。",
             )
         return {"notebook_id": notebook_id, "sources": _json_safe(added)}
+
+    async def _source_upload_bytes(
+        self, client: Any, args: dict[str, Any]
+    ) -> dict[str, Any]:
+        notebook_id = await self._resolve_notebook(client, args["notebook"])
+        raw = _decode_upload_bytes(args.get("bytes_base64"))
+        filename = _safe_upload_filename(args.get("filename") or args.get("title"))
+        suffix = Path(filename).suffix or ".bin"
+        temp_path: Path | None = None
+        try:
+            with tempfile.NamedTemporaryFile(
+                "wb", prefix="notebooklm-upload-", suffix=suffix, delete=False
+            ) as handle:
+                handle.write(raw)
+                temp_path = Path(handle.name)
+            source = await client.sources.add_file(
+                notebook_id,
+                temp_path,
+                mime_type=args.get("mime_type"),
+                title=args.get("title") or filename,
+            )
+        finally:
+            if temp_path is not None:
+                temp_path.unlink(missing_ok=True)
+        return {
+            "notebook_id": notebook_id,
+            "filename": filename,
+            "source": _json_safe(source),
+        }
+
+    async def _source_add_drive_file(
+        self, client: Any, args: dict[str, Any]
+    ) -> dict[str, Any]:
+        notebook_id = await self._resolve_notebook(client, args["notebook"])
+        source = await self._add_drive_file(
+            client,
+            notebook_id,
+            args,
+            wait=bool(args.get("wait")),
+        )
+        return {"notebook_id": notebook_id, "source": _json_safe(source)}
+
+    async def _add_drive_file(
+        self, client: Any, notebook_id: str, args: dict[str, Any], *, wait: bool
+    ) -> Any:
+        file_id = args.get("document_id") or args.get("file_id")
+        if not file_id:
+            raise NotebookToolError(
+                "NOTEBOOKLM_ARGUMENTS",
+                "source_add_drive_file 需要提供 document_id 或 file_id。",
+            )
+        title = args.get("title") or ""
+        return await client.sources.add_drive(
+            notebook_id,
+            file_id,
+            title,
+            mime_type=args.get("mime_type") or DEFAULT_DRIVE_MIME_TYPE,
+            wait=wait,
+            wait_timeout=args.get("timeout") or 120.0,
+        )
+
+    async def _server_info(self, client: Any, args: dict[str, Any]) -> dict[str, Any]:
+        info: dict[str, Any] = {
+            "server": "nootbooklm-bot-native",
+            "version": _notebooklm_version(),
+            "backend": "native",
+            "tool_count": len(LOCAL_TOOLS),
+            "tool_contract": TOOL_CONTRACT,
+            "external_protocol_required": False,
+            "bridge": False,
+        }
+        if args.get("include_account"):
+            info["account"] = await _account_snapshot(client)
+        return info
 
     async def _chat_ask(self, client: Any, args: dict[str, Any]) -> dict[str, Any]:
         notebook_id = await self._resolve_notebook(client, args["notebook"])
@@ -1225,6 +1395,8 @@ class LocalNotebookToolProvider:
             "source_wait": self._handle_source_wait,
             "source_add": self._handle_source_add,
             "source_add_and_wait": self._handle_source_add_and_wait,
+            "source_upload_bytes": self._handle_source_upload_bytes,
+            "source_add_drive_file": self._handle_source_add_drive_file,
             "chat_ask": self._handle_chat_ask,
             "chat_configure": self._handle_chat_configure,
             "suggest_prompts": self._handle_suggest_prompts,
@@ -1245,6 +1417,7 @@ class LocalNotebookToolProvider:
             "share_set_access": self._handle_share_set_access,
             "share_set_user": self._handle_share_set_user,
             "share_remove_user": self._handle_share_remove_user,
+            "server_info": self._handle_server_info,
         }
 
     def reconnect(self) -> None:
@@ -1260,6 +1433,8 @@ class LocalNotebookToolProvider:
                 "UNKNOWN_TOOL", "模型请求了未注册的 NotebookLM 工具"
             )
         payload = dict(arguments or {})
+        if name == "server_info":
+            return handler(payload)
         health = self.health()
         if not health.get("authenticated"):
             raise NotebookToolError(
@@ -1336,14 +1511,35 @@ class LocalNotebookToolProvider:
                 )
             )
 
-        authenticated = bool(google_cookies)
-        stage = "ready" if authenticated else "login_required"
-        summary = (
-            "内置工具可读取默认账号登录态"
-            if authenticated
-            else "需要重新登录 NotebookLM"
+        if not google_cookies:
+            return self._health(
+                False, checks, "login_required", "需要重新登录 NotebookLM"
+            )
+
+        try:
+            probe = self.backend.probe()
+        except Exception:
+            checks.append(
+                _check(
+                    "notebooklm_online",
+                    "failed",
+                    "storage_state 存在，但 NotebookLM 在线探针失败",
+                )
+            )
+            return self._health(
+                False,
+                checks,
+                "online_probe_failed",
+                "登录态文件存在，但无法通过 NotebookLM 在线探针，请重新 /notebook login。",
+            )
+        checks.append(_check("notebooklm_online", "ok", "notebooks.list 在线探针通过"))
+        return self._health(
+            True,
+            checks,
+            "ready",
+            "内置工具已通过 NotebookLM 在线探针",
+            probe=probe,
         )
-        return self._health(authenticated, checks, stage, summary)
 
     def _health(
         self,
@@ -1351,8 +1547,9 @@ class LocalNotebookToolProvider:
         checks: list[dict[str, str]],
         stage: str,
         summary: str,
+        probe: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        return {
+        payload = {
             "backend": "native",
             "ready": ready,
             "authenticated": ready,
@@ -1361,13 +1558,16 @@ class LocalNotebookToolProvider:
             "profile_path": str(self.profile_path),
             "checks": checks,
             "capabilities": {
-                "readiness_probe": "profile_state",
+                "readiness_probe": "profile_state+notebooks.list",
                 "tool_count": len(LOCAL_TOOLS),
-                "tool_contract": "notebooklm-py-0.8.0a3-32-tools",
+                "tool_contract": TOOL_CONTRACT,
                 "external_protocol_required": False,
                 "bridge": False,
             },
         }
+        if probe is not None:
+            payload["probe"] = _json_safe(probe)
+        return payload
 
     def _handle_notebook_list(self, arguments: dict[str, Any]) -> dict[str, Any]:
         return self._invoke("notebook_list", arguments)
@@ -1410,6 +1610,14 @@ class LocalNotebookToolProvider:
 
     def _handle_source_add_and_wait(self, arguments: dict[str, Any]) -> dict[str, Any]:
         return self._invoke("source_add_and_wait", arguments)
+
+    def _handle_source_upload_bytes(self, arguments: dict[str, Any]) -> dict[str, Any]:
+        return self._invoke("source_upload_bytes", arguments)
+
+    def _handle_source_add_drive_file(
+        self, arguments: dict[str, Any]
+    ) -> dict[str, Any]:
+        return self._invoke("source_add_drive_file", arguments)
 
     def _handle_chat_ask(self, arguments: dict[str, Any]) -> dict[str, Any]:
         return self._invoke("chat_ask", arguments)
@@ -1482,6 +1690,36 @@ class LocalNotebookToolProvider:
         if confirmation:
             return confirmation
         return self._invoke("share_remove_user", arguments)
+
+    def _handle_server_info(self, arguments: dict[str, Any]) -> dict[str, Any]:
+        health = self.health()
+        result: dict[str, Any] = {
+            "server": "nootbooklm-bot-native",
+            "version": _notebooklm_version(),
+            "backend": "native",
+            "tool_count": len(LOCAL_TOOLS),
+            "tool_contract": TOOL_CONTRACT,
+            "external_protocol_required": False,
+            "bridge": False,
+            "auth": {
+                "authenticated": health["authenticated"],
+                "stage": health["stage"],
+                "summary": health["summary"],
+            },
+            "health": health,
+        }
+        if arguments.get("include_account") and health.get("authenticated"):
+            try:
+                backend_result = self.backend.invoke("server_info", arguments)
+            except Exception:
+                result["account"] = {
+                    "available": False,
+                    "reason": "account probe failed",
+                }
+            else:
+                if isinstance(backend_result, dict) and "account" in backend_result:
+                    result["account"] = backend_result["account"]
+        return _success("server_info", result)
 
     def _confirmation_required(
         self, tool_name: str, arguments: dict[str, Any]
@@ -1597,6 +1835,77 @@ def _coerce_string_list(value: Any) -> list[str]:
     return [str(value).strip()]
 
 
+def _decode_upload_bytes(value: Any) -> bytes:
+    if not isinstance(value, str) or not value.strip():
+        raise NotebookToolError(
+            "NOTEBOOKLM_ARGUMENTS", "source_upload_bytes 需要提供 bytes_base64。"
+        )
+    if len(value) > SOURCE_UPLOAD_BYTES_B64_LIMIT:
+        raise NotebookToolError(
+            "NOTEBOOKLM_ARGUMENTS",
+            "source_upload_bytes 的 bytes_base64 不能超过 10000 个字符。",
+        )
+    try:
+        raw = base64.b64decode(value, validate=True)
+    except (binascii.Error, ValueError) as exc:
+        raise NotebookToolError(
+            "NOTEBOOKLM_ARGUMENTS", "bytes_base64 必须是标准 base64。"
+        ) from exc
+    if not raw:
+        raise NotebookToolError(
+            "NOTEBOOKLM_ARGUMENTS", "source_upload_bytes 不能上传空文件。"
+        )
+    return raw
+
+
+def _safe_upload_filename(value: Any) -> str:
+    text = str(value or "upload.bin").strip().replace("\\", "/")
+    filename = Path(text).name.strip()
+    return filename or "upload.bin"
+
+
+def _notebooklm_version() -> str:
+    try:
+        from notebooklm._version_info import version_string
+    except Exception:
+        return "unknown"
+    return str(version_string())
+
+
+async def _account_snapshot(client: Any) -> dict[str, Any]:
+    snapshot: dict[str, Any] = {"available": False}
+    get_email = getattr(client, "get_account_email", None)
+    if callable(get_email):
+        try:
+            snapshot["email"] = await _maybe_await(get_email(live_fallback=True))
+        except Exception:
+            snapshot["email"] = None
+    get_authuser = getattr(client, "get_account_authuser", None)
+    if callable(get_authuser):
+        try:
+            snapshot["authuser"] = await _maybe_await(get_authuser())
+        except Exception:
+            snapshot["authuser"] = None
+    settings_api = getattr(client, "settings", None)
+    get_settings = getattr(settings_api, "get_user_settings", None)
+    if callable(get_settings):
+        try:
+            settings = await _maybe_await(get_settings())
+        except Exception:
+            snapshot["reason"] = "settings unavailable"
+        else:
+            limits = getattr(settings, "limits", None)
+            snapshot.update(
+                {
+                    "available": True,
+                    "notebook_limit": getattr(limits, "notebook_limit", None),
+                    "source_limit": getattr(limits, "source_limit", None),
+                    "output_language": getattr(settings, "output_language", None),
+                }
+            )
+    return snapshot
+
+
 def _status_label(item: Any) -> str:
     raw = getattr(item, "status_label", None)
     if raw is None:
@@ -1702,7 +2011,9 @@ def _redacted_preview(arguments: dict[str, Any]) -> dict[str, Any]:
     redacted = {}
     for key, value in arguments.items():
         redacted[key] = (
-            "[provided]" if key.lower() in {"content_base64", "message"} else value
+            "[provided]"
+            if key.lower() in {"bytes_base64", "content_base64", "message"}
+            else value
         )
     return redacted
 
