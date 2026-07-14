@@ -20,6 +20,12 @@ LOGGER = logging.getLogger(__name__)
 READY_SOURCE_STATUSES = {"ready"}
 PROCESSING_SOURCE_STATUSES = {"processing", "preparing", "1", "5"}
 FAILED_SOURCE_STATUSES = {"error", "3"}
+SOURCE_STATUS_CODE_LABELS = {
+    "1": "processing",
+    "2": "ready",
+    "3": "error",
+    "5": "preparing",
+}
 SENSITIVE_EXCEPTION_MARKERS = {
     "authorization",
     "cookie",
@@ -2070,7 +2076,8 @@ def _status_label(item: Any) -> str:
         return ""
     if hasattr(raw, "name"):
         return str(raw.name).strip().lower()
-    return str(getattr(raw, "value", raw)).strip().lower()
+    label = str(getattr(raw, "value", raw)).strip().lower()
+    return SOURCE_STATUS_CODE_LABELS.get(label, label)
 
 
 def _sdk_source_status_label(raw: Any) -> str:
@@ -2086,7 +2093,8 @@ def _sdk_source_status_label(raw: Any) -> str:
         if stripped.isdigit():
             value = int(stripped)
     try:
-        return str(source_status_to_str(value)).strip().lower()
+        label = str(source_status_to_str(value)).strip().lower()
+        return SOURCE_STATUS_CODE_LABELS.get(label, label)
     except Exception:
         return ""
 
