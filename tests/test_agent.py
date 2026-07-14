@@ -7,6 +7,8 @@ from agent.llm_caller import (
     _safe_tool_output,
     format_error_message,
     format_tool_failure_message,
+    _tool_result_title,
+    _tool_task_title,
 )
 from notebooklm_tool import NotebookToolError, ToolDefinition
 
@@ -178,3 +180,37 @@ def test_source_processing_failed_action_recommends_readd_only():
     )
     assert "重新添加" in message
     assert "source_wait" not in message
+
+
+def test_tool_progress_title_hides_internal_tool_name():
+    title = _tool_task_title("source_read", "in_progress")
+
+    assert title == "正在读取来源..."
+    assert "source_read" not in title
+
+
+def test_tool_success_title_uses_user_facing_copy():
+    title = _tool_result_title("notebook_list", {"notebooks": [{"title": "A"}]})
+
+    assert title == "已获取 Notebook 列表: 1 项"
+    assert "notebook_list" not in title
+
+
+def test_tool_error_title_leads_with_human_action():
+    title = _tool_result_title(
+        "source_read", {"error": "SOURCE_NOT_READY", "message": "来源仍在处理"}
+    )
+
+    assert title == "读取来源失败: 来源仍在处理"
+    assert "source_read" not in title
+
+
+def test_runtime_tool_task_titles_use_user_facing_copy():
+    rt, _, _ = runtime([[chunk_call()], []])
+    streamer = Streamer()
+
+    rt.run(streamer, [{"role": "user", "content": "列出 notebooks"}])
+
+    titles = [item["chunks"][0].title for item in streamer.items if "chunks" in item]
+    assert titles == ["正在获取 Notebook 列表...", "已获取 Notebook 列表"]
+    assert all("notebook_list" not in title for title in titles)
