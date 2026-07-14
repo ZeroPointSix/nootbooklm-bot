@@ -151,6 +151,148 @@ def format_tool_failure_message(tool_name: str, code: str, detail: str) -> str:
     )
 
 
+TOOL_TASK_COPY = {
+    "notebook_list": {
+        "in_progress": "正在获取 Notebook 列表...",
+        "complete": "已获取 Notebook 列表",
+        "error": "获取 Notebook 列表失败",
+    },
+    "notebook_create": {
+        "in_progress": "正在创建 Notebook...",
+        "complete": "已创建 Notebook",
+        "error": "创建 Notebook 失败",
+    },
+    "notebook_describe": {
+        "in_progress": "正在查看 Notebook...",
+        "complete": "已查看 Notebook",
+        "error": "查看 Notebook 失败",
+    },
+    "source_list": {
+        "in_progress": "正在获取来源列表...",
+        "complete": "已获取来源列表",
+        "error": "获取来源列表失败",
+    },
+    "source_read": {
+        "in_progress": "正在读取来源...",
+        "complete": "已读取来源",
+        "error": "读取来源失败",
+    },
+    "source_wait": {
+        "in_progress": "正在等待来源处理完成...",
+        "complete": "来源已处理完成",
+        "error": "等待来源处理失败",
+    },
+    "chat_ask": {
+        "in_progress": "正在向 NotebookLM 提问...",
+        "complete": "已收到 NotebookLM 回答",
+        "error": "NotebookLM 问答失败",
+    },
+    "server_info": {
+        "in_progress": "正在检查 NotebookLM 服务...",
+        "complete": "NotebookLM 服务检查完成",
+        "error": "NotebookLM 服务检查失败",
+    },
+}
+
+PREFIX_TOOL_TASK_COPY = [
+    (
+        "notebook_",
+        {
+            "in_progress": "正在处理 Notebook...",
+            "complete": "Notebook 操作已完成",
+            "error": "Notebook 操作失败",
+        },
+    ),
+    (
+        "source_",
+        {
+            "in_progress": "正在处理来源...",
+            "complete": "来源操作已完成",
+            "error": "来源操作失败",
+        },
+    ),
+    (
+        "studio_",
+        {
+            "in_progress": "正在处理 Studio 产物...",
+            "complete": "Studio 产物操作已完成",
+            "error": "Studio 产物操作失败",
+        },
+    ),
+    (
+        "research_",
+        {
+            "in_progress": "正在处理研究任务...",
+            "complete": "研究任务操作已完成",
+            "error": "研究任务操作失败",
+        },
+    ),
+    (
+        "share_",
+        {
+            "in_progress": "正在处理共享设置...",
+            "complete": "共享设置已更新",
+            "error": "共享设置更新失败",
+        },
+    ),
+]
+
+FALLBACK_TOOL_TASK_COPY = {
+    "in_progress": "正在处理 NotebookLM 请求...",
+    "complete": "NotebookLM 请求已完成",
+    "error": "NotebookLM 请求需要处理",
+}
+
+
+def _tool_task_copy(tool_name: str) -> dict[str, str]:
+    if tool_name in TOOL_TASK_COPY:
+        return TOOL_TASK_COPY[tool_name]
+    for prefix, copy in PREFIX_TOOL_TASK_COPY:
+        if tool_name.startswith(prefix):
+            return copy
+    return FALLBACK_TOOL_TASK_COPY
+
+
+def _tool_task_title(tool_name: str, status: str, detail: object | None = None) -> str:
+    title = _tool_task_copy(tool_name).get(status, FALLBACK_TOOL_TASK_COPY[status])
+    if detail is None:
+        return title
+    return f"{title}: {_compact_detail(detail)}"
+
+
+def _compact_detail(detail: object, max_length: int = 96) -> str:
+    text = str(detail).strip()
+    if len(text) <= max_length:
+        return text
+    return f"{text[: max_length - 3].rstrip()}..."
+
+
+def _tool_result_detail(result: dict[str, Any]) -> object | None:
+    for key in (
+        "message",
+        "title",
+        "notebook_title",
+        "source_title",
+        "artifact_title",
+        "poll_task_id",
+    ):
+        value = result.get(key)
+        if isinstance(value, str) and value.strip():
+            return value
+    for key in ("notebooks", "sources", "items", "artifacts"):
+        value = result.get(key)
+        if isinstance(value, list):
+            return f"{len(value)} 项"
+    return None
+
+
+def _tool_result_title(tool_name: str, result: dict[str, Any]) -> str:
+    if result.get("error") is not None:
+        detail = result.get("message") or result["error"]
+        return _tool_task_title(tool_name, "error", detail)
+    return _tool_task_title(tool_name, "complete", _tool_result_detail(result))
+
+
 class AgentRuntime:
     def __init__(
         self,
@@ -248,7 +390,7 @@ class AgentRuntime:
                     chunks=[
                         TaskUpdateChunk(
                             id=call.call_id,
-                            title=f"正在执行 NotebookLM 工具：{call.name}",
+                            title=_tool_task_title(call.name, "in_progress"),
                             status="in_progress",
                         )
                     ]
@@ -275,14 +417,14 @@ class AgentRuntime:
             result = self.notebook.call_tool(call.name, arguments)
             output = _safe_tool_output(result)
             status = "complete"
-            title = f"NotebookLM 工具已完成：{call.name}"
+            title = _tool_result_title(call.name, result)
         except (json.JSONDecodeError, ValueError):
             output = json.dumps(
                 {"error": "INVALID_ARGUMENTS", "message": "工具参数无效"},
                 ensure_ascii=False,
             )
             status = "error"
-            title = "NotebookLM 工具参数无效"
+            title = _tool_task_title(call.name, "error", "工具参数无效")
             failure_message = format_tool_failure_message(
                 call.name, "INVALID_ARGUMENTS", "工具参数无效"
             )
@@ -293,7 +435,7 @@ class AgentRuntime:
                 payload["details"] = details
             output = json.dumps(payload, ensure_ascii=False, default=str)
             status = "error"
-            title = str(exc)
+            title = _tool_task_title(call.name, "error", str(exc))
             failure_message = format_tool_failure_message(call.name, exc.code, str(exc))
         prompts.append(
             {"role": "tool", "tool_call_id": call.call_id, "content": output}
