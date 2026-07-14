@@ -1,10 +1,10 @@
 from logging import Logger
 
-from openai.types.responses import ResponseInputParam
 from slack_bolt import Say
 from slack_sdk import WebClient
 
 from agent.llm_caller import call_llm
+from agent.thread_gateway import build_slack_thread_prompt, resolve_thread_ts
 from listeners.views.feedback_block import create_feedback_block
 
 
@@ -23,7 +23,8 @@ def app_mentioned_callback(client: WebClient, event: dict, logger: Logger, say: 
         channel_id = event.get("channel")
         team_id = event.get("team")
         text = event.get("text")
-        thread_ts = event.get("thread_ts") or event.get("ts")
+        thread_ts = resolve_thread_ts(event)
+        current_ts = event.get("ts")
         user_id = event.get("user")
 
         client.assistant_threads_setStatus(
@@ -45,12 +46,16 @@ def app_mentioned_callback(client: WebClient, event: dict, logger: Logger, say: 
             recipient_user_id=user_id,
             thread_ts=thread_ts,
         )
-        prompts: ResponseInputParam = [
-            {
-                "role": "user",
-                "content": text,
-            },
-        ]
+        prompts = build_slack_thread_prompt(
+            client=client,
+            team_id=team_id,
+            channel_id=channel_id,
+            thread_ts=thread_ts,
+            current_ts=current_ts,
+            current_user_id=user_id,
+            current_text=text or "",
+            logger=logger,
+        )
         call_llm(streamer, prompts)
 
         feedback_block = create_feedback_block()

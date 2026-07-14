@@ -1,7 +1,6 @@
 import time
 from logging import Logger
 
-from openai.types.responses import ResponseInputParam
 from slack_bolt import BoltContext, Say, SetStatus
 from slack_sdk import WebClient
 from slack_sdk.models.messages.chunk import (
@@ -11,6 +10,7 @@ from slack_sdk.models.messages.chunk import (
 )
 
 from agent.llm_caller import call_llm
+from agent.thread_gateway import build_slack_thread_prompt, resolve_thread_ts
 from listeners.views.feedback_block import create_feedback_block
 
 
@@ -37,8 +37,9 @@ def message(
     try:
         channel_id = payload["channel"]
         team_id = context.team_id
-        thread_ts = payload["thread_ts"]
-        user_id = context.user_id
+        thread_ts = resolve_thread_ts(payload)
+        current_ts = message.get("ts") or payload.get("ts")
+        user_id = context.user_id or message.get("user")
 
         # The first example shows a message with thinking steps that has different
         # chunks to construct and update a plan alongside text outputs.
@@ -147,12 +148,16 @@ def message(
                 thread_ts=thread_ts,
                 task_display_mode="timeline",
             )
-            prompts: ResponseInputParam = [
-                {
-                    "role": "user",
-                    "content": message["text"],
-                },
-            ]
+            prompts = build_slack_thread_prompt(
+                client=client,
+                team_id=team_id,
+                channel_id=channel_id,
+                thread_ts=thread_ts,
+                current_ts=current_ts,
+                current_user_id=user_id,
+                current_text=message.get("text") or "",
+                logger=logger,
+            )
             call_llm(streamer, prompts)
 
             feedback_block = create_feedback_block()
