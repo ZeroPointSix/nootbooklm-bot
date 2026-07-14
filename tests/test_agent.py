@@ -2,7 +2,12 @@ from types import SimpleNamespace
 
 import pytest
 
-from agent.llm_caller import AgentRuntime, _safe_tool_output, format_error_message
+from agent.llm_caller import (
+    AgentRuntime,
+    _safe_tool_output,
+    format_error_message,
+    format_tool_failure_message,
+)
 from notebooklm_tool import NotebookToolError, ToolDefinition
 
 
@@ -157,3 +162,19 @@ def test_error_message_shows_distinct_code_and_action():
     message = format_error_message(RuntimeError("工具调用轮数超过安全上限"))
     assert "AGENT_RUNTIME_ERROR" in message
     assert "建议动作" in message
+
+
+def test_source_not_ready_action_recommends_wait_only():
+    message = format_tool_failure_message(
+        "source_read", "SOURCE_NOT_READY", "来源仍在处理"
+    )
+    assert "source_wait" in message
+    assert "重新添加" not in message
+
+
+def test_source_processing_failed_action_recommends_readd_only():
+    message = format_tool_failure_message(
+        "source_read", "SOURCE_PROCESSING_FAILED", "来源处理失败"
+    )
+    assert "重新添加" in message
+    assert "source_wait" not in message

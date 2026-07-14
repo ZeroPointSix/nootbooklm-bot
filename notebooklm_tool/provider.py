@@ -17,16 +17,9 @@ DEFAULT_DRIVE_MIME_TYPE = "application/vnd.google-apps.document"
 SOURCE_UPLOAD_BYTES_B64_LIMIT = 10_000
 TOOL_CONTRACT = "notebooklm-py-0.8.0a3-35-tools"
 LOGGER = logging.getLogger(__name__)
-READY_SOURCE_STATUSES = {
-    "2",
-    "ready",
-    "complete",
-    "completed",
-    "processed",
-    "available",
-    "source_status_ready",
-    "source_status_processed",
-}
+READY_SOURCE_STATUSES = {"ready"}
+PROCESSING_SOURCE_STATUSES = {"processing", "preparing", "1", "5"}
+FAILED_SOURCE_STATUSES = {"error", "3"}
 SENSITIVE_EXCEPTION_MARKERS = {
     "authorization",
     "cookie",
@@ -1854,11 +1847,25 @@ def _classify_tool_exception(tool_name: str, exc: Exception) -> NotebookToolErro
         )
     if tool_name == "source_read" and any(
         marker in text
-        for marker in ("not ready", "processing", "processed", "source status")
+        for marker in (
+            "processing failed",
+            "source processing failed",
+            "source_status_error",
+            "status error",
+        )
+    ):
+        return NotebookToolError(
+            "SOURCE_PROCESSING_FAILED",
+            "NotebookLM 来源处理失败，无法继续读取；请删除该来源后重新添加。",
+            details=details,
+        )
+    if tool_name == "source_read" and any(
+        marker in text
+        for marker in ("not ready", "processing", "preparing", "source status")
     ):
         return NotebookToolError(
             "SOURCE_NOT_READY",
-            "NotebookLM 来源还没有处于可读取状态；请先执行 source_wait，或重新添加处理失败的来源。",
+            "NotebookLM 来源仍在处理或尚未可读取；请先执行 source_wait，等待处理完成后再读取。",
             details=details,
         )
     return NotebookToolError(
@@ -2031,20 +2038,57 @@ def _ensure_source_ready_for_read(source: Any) -> None:
     status = _status_label(source)
     if not status or status in READY_SOURCE_STATUSES:
         return
+    details = _source_status_details(source)
+    if status in FAILED_SOURCE_STATUSES:
+        raise NotebookToolError(
+            "SOURCE_PROCESSING_FAILED",
+            "NotebookLM 来源处理失败，无法继续读取；请删除该来源后重新添加，处理成功后再读取。",
+            details=details,
+        )
+    if status in PROCESSING_SOURCE_STATUSES:
+        raise NotebookToolError(
+            "SOURCE_NOT_READY",
+            "NotebookLM 来源仍在处理；请先执行 source_wait，等待处理完成后再读取。",
+            details=details,
+        )
     raise NotebookToolError(
         "SOURCE_NOT_READY",
-        "NotebookLM 来源还没有处于可读取状态；请先执行 source_wait，或重新添加处理失败的来源。",
-        details=_source_status_details(source),
+        "NotebookLM 来源尚未处于可读取状态；请先执行 source_wait，等待处理完成后再读取。",
+        details=details,
     )
 
 
 def _status_label(item: Any) -> str:
-    raw = getattr(item, "status_label", None)
+    raw_status = getattr(item, "status", None)
+    raw_label = getattr(item, "status_label", None)
+    for raw in (raw_status, raw_label):
+        label = _sdk_source_status_label(raw)
+        if label and label != "unknown":
+            return label
+    raw = raw_label if raw_label is not None else raw_status
     if raw is None:
-        raw = getattr(item, "status", "")
+        return ""
     if hasattr(raw, "name"):
-        return str(raw.name).lower()
-    return str(raw).lower()
+        return str(raw.name).strip().lower()
+    return str(getattr(raw, "value", raw)).strip().lower()
+
+
+def _sdk_source_status_label(raw: Any) -> str:
+    if raw is None:
+        return ""
+    try:
+        from notebooklm.rpc.types import source_status_to_str
+    except Exception:
+        return ""
+    value = getattr(raw, "value", raw)
+    if isinstance(value, str):
+        stripped = value.strip()
+        if stripped.isdigit():
+            value = int(stripped)
+    try:
+        return str(source_status_to_str(value)).strip().lower()
+    except Exception:
+        return ""
 
 
 def _enum_choice(

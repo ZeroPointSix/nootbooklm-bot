@@ -90,12 +90,17 @@ class FakeSourceAPI:
         return [
             SimpleNamespace(id="src-ready", title="Ready Source", status=2),
             SimpleNamespace(id="src-failed", title="Failed Source", status=3),
+            SimpleNamespace(id="src-processing", title="Processing Source", status=1),
         ]
 
     async def get(self, notebook_id, source_id):
         assert notebook_id == "nb1"
-        status = 2 if source_id == "src-ready" else 3
-        title = "Ready Source" if source_id == "src-ready" else "Failed Source"
+        sources = {
+            "src-ready": ("Ready Source", 2),
+            "src-failed": ("Failed Source", 3),
+            "src-processing": ("Processing Source", 1),
+        }
+        title, status = sources[source_id]
         return SimpleNamespace(id=source_id, title=title, status=status)
 
     async def get_guide(self, notebook_id, source_id):
@@ -263,7 +268,7 @@ def test_unknown_tools_are_rejected(tmp_path):
     assert caught.value.code == "UNKNOWN_TOOL"
 
 
-def test_source_read_rejects_non_ready_source_before_fulltext():
+def test_source_read_reports_processing_failed_before_fulltext():
     backend = SDKNotebookLMBackend("unused-storage-state.json")
     client = FakeClient()
 
@@ -274,9 +279,28 @@ def test_source_read_rejects_non_ready_source_before_fulltext():
             )
         )
 
+    assert caught.value.code == "SOURCE_PROCESSING_FAILED"
+    assert "重新添加" in str(caught.value)
+    assert "source_wait" not in str(caught.value)
+    assert caught.value.details["source_status"] == "error"
+    assert client.sources.fulltext_calls == []
+
+
+def test_source_read_reports_processing_source_as_not_ready():
+    backend = SDKNotebookLMBackend("unused-storage-state.json")
+    client = FakeClient()
+
+    with pytest.raises(NotebookToolError) as caught:
+        asyncio.run(
+            backend._source_read(
+                client, {"notebook": "Research", "source": "Processing Source"}
+            )
+        )
+
     assert caught.value.code == "SOURCE_NOT_READY"
     assert "source_wait" in str(caught.value)
-    assert caught.value.details["source_status"] == "3"
+    assert "重新添加" not in str(caught.value)
+    assert caught.value.details["source_status"] == "processing"
     assert client.sources.fulltext_calls == []
 
 

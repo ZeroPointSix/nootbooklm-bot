@@ -134,7 +134,8 @@ def format_error_message(exc: Exception) -> str:
 
 def format_tool_failure_message(tool_name: str, code: str, detail: str) -> str:
     actions = {
-        "SOURCE_NOT_READY": "请先执行 source_wait，或重新添加处理失败的来源后再读。",
+        "SOURCE_NOT_READY": "请先执行 source_wait，等待来源处理完成后再读。",
+        "SOURCE_PROCESSING_FAILED": "请删除该来源后重新添加，确认处理成功后再读取。",
         "SOURCE_READ_UNSUPPORTED": "请先改用摘要读取，或重新添加一个 NotebookLM 支持全文读取的来源。",
         "LOGIN_EXPIRED": "请重新执行 /notebook login 后再试。",
         "TIMEOUT": "请稍后重试；如果持续超时，再检查 NotebookLM 上游状态。",
