@@ -5,7 +5,7 @@ from types import SimpleNamespace
 import pytest
 
 from notebooklm_tool import LocalNotebookToolProvider, NotebookToolError
-from notebooklm_tool.provider import SDKNotebookLMBackend
+from notebooklm_tool.provider import SDKNotebookLMBackend, _status_label
 
 
 EXPECTED_TOOL_NAMES = [
@@ -266,6 +266,12 @@ def test_unknown_tools_are_rejected(tmp_path):
     with pytest.raises(NotebookToolError) as caught:
         provider.call_tool("notebook_health", {"notebook": "Research"})
     assert caught.value.code == "UNKNOWN_TOOL"
+
+
+def test_numeric_source_statuses_are_normalized_to_labels():
+    assert _status_label(SimpleNamespace(status=1)) == "processing"
+    assert _status_label(SimpleNamespace(status=2)) == "ready"
+    assert _status_label(SimpleNamespace(status=3)) == "error"
 
 
 def test_source_read_reports_processing_failed_before_fulltext():
