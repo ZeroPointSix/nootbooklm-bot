@@ -26,6 +26,9 @@ def app_mentioned_callback(client: WebClient, event: dict, logger: Logger, say: 
         thread_ts = resolve_thread_ts(event)
         current_ts = event.get("ts")
         user_id = event.get("user")
+        if not channel_id or not thread_ts:
+            logger.warning("Ignoring app mention without channel_id or thread_ts")
+            return
 
         client.assistant_threads_setStatus(
             channel_id=channel_id,
@@ -55,6 +58,7 @@ def app_mentioned_callback(client: WebClient, event: dict, logger: Logger, say: 
             current_user_id=user_id,
             current_text=text or "",
             logger=logger,
+            trigger_source="app_mention",
         )
         call_llm(streamer, prompts)
 

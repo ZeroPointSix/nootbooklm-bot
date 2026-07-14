@@ -10,7 +10,11 @@ from slack_sdk.models.messages.chunk import (
 )
 
 from agent.llm_caller import call_llm
-from agent.thread_gateway import build_slack_thread_prompt, resolve_thread_ts
+from agent.thread_gateway import (
+    build_slack_thread_prompt,
+    is_processable_assistant_message,
+    resolve_thread_ts,
+)
 from listeners.views.feedback_block import create_feedback_block
 
 
@@ -40,10 +44,15 @@ def message(
         thread_ts = resolve_thread_ts(payload)
         current_ts = message.get("ts") or payload.get("ts")
         user_id = context.user_id or message.get("user")
+        text = message.get("text") or payload.get("text") or ""
+
+        if not is_processable_assistant_message(message, payload):
+            logger.debug("Ignoring assistant message without processable user text")
+            return
 
         # The first example shows a message with thinking steps that has different
         # chunks to construct and update a plan alongside text outputs.
-        if message["text"] == "Wonder a few deep thoughts.":
+        if text == "Wonder a few deep thoughts.":
             set_status(
                 status="thinking...",
                 loading_messages=[
@@ -155,8 +164,9 @@ def message(
                 thread_ts=thread_ts,
                 current_ts=current_ts,
                 current_user_id=user_id,
-                current_text=message.get("text") or "",
+                current_text=text,
                 logger=logger,
+                trigger_source="assistant_user_message",
             )
             call_llm(streamer, prompts)
 
