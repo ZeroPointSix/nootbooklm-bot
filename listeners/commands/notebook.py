@@ -1,13 +1,11 @@
 from __future__ import annotations
 
-import json
 from typing import Any
 from urllib.parse import quote
 
 from auth import ProfileManager, SQLiteLoginSessionStore
 from config import Settings
-from notebooklm_mcp import MCPError
-from notebooklm_mcp.shared import get_shared_mcp_client
+from notebooklm_tool import build_notebook_provider
 
 _settings = Settings.from_env()
 _sessions = SQLiteLoginSessionStore(
@@ -57,21 +55,7 @@ def notebook_command(ack, command: dict, respond) -> None:
         )
         return
     if action == "status":
-        active = _sessions.active()
-        if active:
-            respond(f"NotebookLM 登录状态：{active.status.value}")
-            return
-        authenticated, error = get_mcp_auth_status()
-        if authenticated is True:
-            respond("NotebookLM 登录状态：在线验证通过（MCP authenticated=true）。")
-        elif authenticated is False:
-            respond("NotebookLM 登录状态：在线验证未通过（MCP authenticated=false）。请执行 /notebook login 重新登录。")
-        elif _profiles.exists():
-            suffix = f"：{error}" if error else "。"
-            respond(f"NotebookLM 登录状态：已保存本地登录态，但 MCP 在线验证失败{suffix}")
-        else:
-            suffix = f"（MCP 在线验证失败：{error}）" if error else ""
-            respond(f"NotebookLM 登录状态：未配置{suffix}")
+        respond(_status_text())
         return
     if action == "login" and len(parts) > 1 and parts[1].lower() == "cancel":
         session = _sessions.cancel_active()
@@ -107,6 +91,46 @@ def notebook_command(ack, command: dict, respond) -> None:
         respond("NotebookLM 默认账号登录态已清除。")
         return
     respond("未知子命令。执行 /notebook help 查看帮助。")
+
+
+def _status_text() -> str:
+    active = _sessions.active()
+    try:
+        health = build_notebook_provider(_settings).health()
+    except Exception as exc:
+        health = {
+            "backend": "native",
+            "ready": False,
+            "summary": "NotebookLM 健全检查失败",
+            "checks": [
+                {"name": "provider", "status": "failed", "message": str(exc)},
+            ],
+        }
+
+    lines = [
+        f"NotebookLM 健全状态：{'ready' if health.get('ready') else 'not_ready'}",
+        f"后端：{health.get('backend', 'unknown')}",
+        f"摘要：{health.get('summary', '无摘要')}",
+    ]
+    if active:
+        lines.append(f"登录会话：{active.status.value}")
+    for item in health.get("checks", []):
+        if not isinstance(item, dict):
+            continue
+        lines.append(
+            f"- {item.get('name', 'check')}: "
+            f"{_label(item.get('status'))} - {item.get('message', '')}"
+        )
+    return "\n".join(lines)
+
+
+def _label(status: Any) -> str:
+    return {
+        "ok": "通过",
+        "warning": "警告",
+        "failed": "失败",
+        "skipped": "跳过",
+    }.get(str(status), "未知")
 
 
 def get_session_store() -> SQLiteLoginSessionStore:

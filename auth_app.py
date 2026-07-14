@@ -11,6 +11,7 @@ from auth.browser import ExternalBrowserWorker
 from auth.sessions import LoginStatus
 from config import Settings
 from listeners.commands.notebook import get_profile_manager, get_session_store
+from notebooklm_tool import build_notebook_provider
 
 settings = Settings.from_env()
 app = FastAPI(
@@ -62,8 +63,13 @@ def complete_login(
     if not session or session.status != LoginStatus.BROWSER_STARTED:
         raise HTTPException(status_code=409, detail="登录会话状态无效")
 
-    def accept_storage_state(_path) -> bool:
-        return True
+    def verify(_path) -> bool:
+        try:
+            notebook = build_notebook_provider(settings)
+            notebook.reconnect()
+            return bool(notebook.health().get("ready"))
+        except Exception:
+            return False
 
     try:
         get_profile_manager().install(request.storage_state, verify=accept_storage_state)
@@ -80,8 +86,8 @@ def complete_login(
             WebClient(token=settings.slack_bot_token).chat_postMessage(
                 channel=completed.slack_channel_id,
                 thread_ts=completed.slack_thread_ts,
-                text="NotebookLM 登录态已保存。请执行 /notebook status 查看 MCP 在线验证结果；只有在线验证通过后才表示可以使用。",
+                text="NotebookLM 登录验证通过。默认账号现在可以被内置工具读取。",
             )
         except Exception:
             pass
-    return {"status": "authenticated"}
+    return {"status": "authenticated", "backend": "native"}

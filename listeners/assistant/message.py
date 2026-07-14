@@ -1,10 +1,9 @@
 from logging import Logger
 
-from openai.types.responses import ResponseInputParam
 from slack_bolt import BoltContext, Say, SetStatus
 from slack_sdk import WebClient
 
-from agent.llm_caller import call_llm
+from agent.llm_caller import call_llm, format_error_message
 from listeners.views.feedback_block import create_feedback_block
 
 
@@ -31,11 +30,11 @@ def message(
             thread_ts=thread_ts,
             task_display_mode="timeline",
         )
-        prompts: ResponseInputParam = [
+        prompts: list[dict] = [
             {"role": "user", "content": str(message.get("text", ""))[:20_000]}
         ]
         call_llm(streamer, prompts)
         streamer.stop(blocks=create_feedback_block())
-    except Exception:
+    except Exception as exc:
         logger.exception("处理 Slack Assistant 消息失败")
-        say(":warning: NotebookLM 请求失败，请稍后重试或执行 /notebook status。")
+        say(format_error_message(exc))

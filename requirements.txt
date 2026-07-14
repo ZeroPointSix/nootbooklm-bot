@@ -5,6 +5,7 @@ slack-cli-hooks<1.0.0
 # OpenAI-compatible client for Responses API tool calling.
 # Point LLM_API_URL at any compatible provider endpoint.
 openai==2.45.0
+notebooklm-py==0.8.0a3
 
 pytest==9.1.1
 ruff==0.15.21
