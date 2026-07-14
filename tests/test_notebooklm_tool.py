@@ -1,8 +1,11 @@
+import asyncio
 import json
+from types import SimpleNamespace
 
 import pytest
 
 from notebooklm_tool import LocalNotebookToolProvider, NotebookToolError
+from notebooklm_tool.provider import SDKNotebookLMBackend
 
 
 EXPECTED_TOOL_NAMES = [
@@ -45,7 +48,7 @@ EXPECTED_TOOL_NAMES = [
 
 
 class FakeBackend:
-    def __init__(self, *, probe_result=None, probe_error=None):
+    def __init__(self, *, probe_result=None, probe_error=None, invoke_error=None):
         self.calls = []
         self.reconnects = 0
         self.probes = 0
@@ -55,6 +58,7 @@ class FakeBackend:
             "notebook_count": 0,
         }
         self.probe_error = probe_error
+        self.invoke_error = invoke_error
 
     def reconnect(self):
         self.reconnects += 1
@@ -67,7 +71,45 @@ class FakeBackend:
 
     def invoke(self, tool_name, arguments):
         self.calls.append((tool_name, arguments))
+        if self.invoke_error:
+            raise self.invoke_error
         return {"tool_name": tool_name, "arguments": arguments}
+
+
+class FakeNotebookAPI:
+    async def list(self):
+        return [SimpleNamespace(id="nb1", title="Research")]
+
+
+class FakeSourceAPI:
+    def __init__(self):
+        self.fulltext_calls = []
+
+    async def list(self, notebook_id):
+        assert notebook_id == "nb1"
+        return [
+            SimpleNamespace(id="src-ready", title="Ready Source", status=2),
+            SimpleNamespace(id="src-failed", title="Failed Source", status=3),
+        ]
+
+    async def get(self, notebook_id, source_id):
+        assert notebook_id == "nb1"
+        status = 2 if source_id == "src-ready" else 3
+        title = "Ready Source" if source_id == "src-ready" else "Failed Source"
+        return SimpleNamespace(id=source_id, title=title, status=status)
+
+    async def get_guide(self, notebook_id, source_id):
+        return {"summary": f"summary for {source_id}"}
+
+    async def get_fulltext(self, notebook_id, source_id, *, output_format):
+        self.fulltext_calls.append((notebook_id, source_id, output_format))
+        return {"text": "full text body"}
+
+
+class FakeClient:
+    def __init__(self):
+        self.notebooks = FakeNotebookAPI()
+        self.sources = FakeSourceAPI()
 
 
 def storage_state(path, *, google=True, notebooklm=True):
@@ -219,3 +261,54 @@ def test_unknown_tools_are_rejected(tmp_path):
     with pytest.raises(NotebookToolError) as caught:
         provider.call_tool("notebook_health", {"notebook": "Research"})
     assert caught.value.code == "UNKNOWN_TOOL"
+
+
+def test_source_read_rejects_non_ready_source_before_fulltext():
+    backend = SDKNotebookLMBackend("unused-storage-state.json")
+    client = FakeClient()
+
+    with pytest.raises(NotebookToolError) as caught:
+        asyncio.run(
+            backend._source_read(
+                client, {"notebook": "Research", "source": "Failed Source"}
+            )
+        )
+
+    assert caught.value.code == "SOURCE_NOT_READY"
+    assert "source_wait" in str(caught.value)
+    assert caught.value.details["source_status"] == "3"
+    assert client.sources.fulltext_calls == []
+
+
+def test_source_read_allows_ready_source_and_slices_fulltext():
+    backend = SDKNotebookLMBackend("unused-storage-state.json")
+    client = FakeClient()
+
+    result = asyncio.run(
+        backend._source_read(
+            client,
+            {
+                "notebook": "Research",
+                "source": "Ready Source",
+                "max_chars": 4,
+            },
+        )
+    )
+
+    assert result["source_id"] == "src-ready"
+    assert result["fulltext"]["text"] == "full"
+    assert result["fulltext"]["text_char_count"] == len("full text body")
+    assert client.sources.fulltext_calls == [("nb1", "src-ready", "text")]
+
+
+def test_backend_failures_are_classified_instead_of_generic_tool_failed(tmp_path):
+    path = tmp_path / "storage_state.json"
+    storage_state(path)
+    backend = FakeBackend(invoke_error=RuntimeError("HTTP 401 login expired"))
+    provider = LocalNotebookToolProvider(str(path), backend=backend)
+
+    with pytest.raises(NotebookToolError) as caught:
+        provider.call_tool("notebook_list", {})
+
+    assert caught.value.code == "LOGIN_EXPIRED"
+    assert caught.value.details["tool"] == "notebook_list"

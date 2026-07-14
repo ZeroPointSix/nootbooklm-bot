@@ -5,6 +5,7 @@ import base64
 import binascii
 import inspect
 import json
+import logging
 import tempfile
 from dataclasses import asdict, dataclass, is_dataclass
 from pathlib import Path
@@ -15,6 +16,24 @@ from urllib.parse import parse_qs, urlparse
 DEFAULT_DRIVE_MIME_TYPE = "application/vnd.google-apps.document"
 SOURCE_UPLOAD_BYTES_B64_LIMIT = 10_000
 TOOL_CONTRACT = "notebooklm-py-0.8.0a3-35-tools"
+LOGGER = logging.getLogger(__name__)
+READY_SOURCE_STATUSES = {
+    "2",
+    "ready",
+    "complete",
+    "completed",
+    "processed",
+    "available",
+    "source_status_ready",
+    "source_status_processed",
+}
+SENSITIVE_EXCEPTION_MARKERS = {
+    "authorization",
+    "cookie",
+    "password",
+    "storage_state",
+    "token",
+}
 
 
 TOOL_NAMES = (
@@ -84,8 +103,9 @@ class ToolDefinition:
 class NotebookToolError(RuntimeError):
     """A safe, normalized NotebookLM tool failure."""
 
-    def __init__(self, code: str, message: str):
+    def __init__(self, code: str, message: str, details: dict[str, Any] | None = None):
         self.code = code
+        self.details = details or {}
         super().__init__(message)
 
 
@@ -902,7 +922,11 @@ class SDKNotebookLMBackend:
 
     async def _source_read(self, client: Any, args: dict[str, Any]) -> dict[str, Any]:
         notebook_id = await self._resolve_notebook(client, args["notebook"])
-        source_id = await self._resolve_source(client, notebook_id, args["source"])
+        sources = list(await client.sources.list(notebook_id))
+        source_id = await self._resolve_id(sources, args["source"], "source")
+        listed_source = _find_item_by_id(sources, source_id)
+        if listed_source is not None:
+            _ensure_source_ready_for_read(listed_source)
         if args.get("detail") == "summary":
             guide = await client.sources.get_guide(notebook_id, source_id)
             return {
@@ -911,6 +935,7 @@ class SDKNotebookLMBackend:
                 "summary": _json_safe(guide),
             }
         source = await client.sources.get(notebook_id, source_id)
+        _ensure_source_ready_for_read(source)
         fulltext = _json_safe(
             await client.sources.get_fulltext(
                 notebook_id,
@@ -1740,9 +1765,14 @@ class LocalNotebookToolProvider:
         except NotebookToolError:
             raise
         except Exception as exc:
-            raise NotebookToolError(
-                "NOTEBOOKLM_TOOL_FAILED", f"NotebookLM 工具执行失败：{tool_name}"
-            ) from exc
+            safe_message = _safe_exception_message(exc)
+            LOGGER.warning(
+                "NotebookLM tool %s failed with %s: %s",
+                tool_name,
+                type(exc).__name__,
+                safe_message,
+            )
+            raise _classify_tool_exception(tool_name, exc) from exc
         return _success(tool_name, result)
 
 
@@ -1763,6 +1793,79 @@ def _resolve_path(root: Any, dotted_path: str) -> Any | None:
 
 def _sdk_arguments(arguments: dict[str, Any]) -> dict[str, Any]:
     return {key: value for key, value in arguments.items() if key != "confirm"}
+
+
+def _exception_text(exc: Exception) -> str:
+    values = [type(exc).__name__, str(exc)]
+    for attr in ("status_code", "code"):
+        value = getattr(exc, attr, None)
+        if value is not None:
+            values.append(str(value))
+    return " ".join(values).lower()
+
+
+def _safe_exception_message(exc: Exception) -> str:
+    message = " ".join((str(exc) or type(exc).__name__).split())
+    if any(marker in message.lower() for marker in SENSITIVE_EXCEPTION_MARKERS):
+        return f"{type(exc).__name__}: [redacted]"
+    return message[:500] or type(exc).__name__
+
+
+def _classify_tool_exception(tool_name: str, exc: Exception) -> NotebookToolError:
+    text = _exception_text(exc)
+    details = {"tool": tool_name, "exception_type": type(exc).__name__}
+    if isinstance(exc, TimeoutError) or "timeout" in text or "timed out" in text:
+        return NotebookToolError(
+            "TIMEOUT",
+            f"NotebookLM 工具执行超时：{tool_name}。请稍后重试。",
+            details=details,
+        )
+    if any(
+        marker in text
+        for marker in (
+            "401",
+            "403",
+            "auth",
+            "login",
+            "unauthor",
+            "expired",
+            "forbidden",
+        )
+    ):
+        return NotebookToolError(
+            "LOGIN_EXPIRED",
+            "NotebookLM 登录态可能已失效，请重新执行 /notebook login 后再试。",
+            details=details,
+        )
+    if tool_name == "source_read" and any(
+        marker in text
+        for marker in (
+            "fulltext",
+            "full text",
+            "unsupported",
+            "not supported",
+            "source content",
+        )
+    ):
+        return NotebookToolError(
+            "SOURCE_READ_UNSUPPORTED",
+            "当前 NotebookLM 来源暂不支持读取全文；可以先改用摘要或重新添加来源。",
+            details=details,
+        )
+    if tool_name == "source_read" and any(
+        marker in text
+        for marker in ("not ready", "processing", "processed", "source status")
+    ):
+        return NotebookToolError(
+            "SOURCE_NOT_READY",
+            "NotebookLM 来源还没有处于可读取状态；请先执行 source_wait，或重新添加处理失败的来源。",
+            details=details,
+        )
+    return NotebookToolError(
+        "NOTEBOOKLM_UPSTREAM_CHANGED",
+        f"NotebookLM 工具执行失败：{tool_name}。上游页面或 SDK 返回格式可能发生变化。",
+        details=details,
+    )
 
 
 async def _call_with_supported_args(method: Any, arguments: dict[str, Any]) -> Any:
@@ -1904,6 +2007,35 @@ async def _account_snapshot(client: Any) -> dict[str, Any]:
                 }
             )
     return snapshot
+
+
+def _find_item_by_id(items: list[Any], item_id: str) -> Any | None:
+    for item in items:
+        try:
+            if _item_id(item) == item_id:
+                return item
+        except NotebookToolError:
+            continue
+    return None
+
+
+def _source_status_details(source: Any) -> dict[str, Any]:
+    return {
+        "source_id": _item_id(source),
+        "source_title": _item_title(source),
+        "source_status": _status_label(source),
+    }
+
+
+def _ensure_source_ready_for_read(source: Any) -> None:
+    status = _status_label(source)
+    if not status or status in READY_SOURCE_STATUSES:
+        return
+    raise NotebookToolError(
+        "SOURCE_NOT_READY",
+        "NotebookLM 来源还没有处于可读取状态；请先执行 source_wait，或重新添加处理失败的来源。",
+        details=_source_status_details(source),
+    )
 
 
 def _status_label(item: Any) -> str:

@@ -3,7 +3,7 @@ from types import SimpleNamespace
 import pytest
 
 from agent.llm_caller import AgentRuntime, _safe_tool_output, format_error_message
-from notebooklm_tool import ToolDefinition
+from notebooklm_tool import NotebookToolError, ToolDefinition
 
 
 class Streamer:
@@ -15,14 +15,17 @@ class Streamer:
 
 
 class Provider:
-    def __init__(self):
+    def __init__(self, error=None):
         self.calls = []
+        self.error = error
 
     def list_tools(self):
         return [ToolDefinition("notebook_list", "list", {"type": "object"})]
 
     def call_tool(self, name, arguments):
         self.calls.append((name, arguments))
+        if self.error:
+            raise self.error
         return {"content": [{"type": "text", "text": "notebooks"}]}
 
 
@@ -61,8 +64,8 @@ class Completions:
         return next(self.rounds)
 
 
-def runtime(rounds, max_rounds=8):
-    provider = Provider()
+def runtime(rounds, max_rounds=8, provider=None):
+    provider = provider or Provider()
     completions = Completions(rounds)
     llm = SimpleNamespace(chat=SimpleNamespace(completions=completions))
     return (
@@ -88,6 +91,36 @@ def test_chat_completion_text_delta_is_streamed():
     rt.run(streamer, [{"role": "user", "content": "hi"}])
     assert provider.calls == []
     assert streamer.items == [{"markdown_text": "OK"}]
+
+
+def test_pre_tool_text_is_suppressed_when_tool_call_is_present():
+    rt, provider, _ = runtime([[chunk_text("我先看看"), chunk_call()], []])
+    streamer = Streamer()
+    rt.run(streamer, [{"role": "user", "content": "列出 notebooks"}])
+    assert provider.calls == [("notebook_list", {})]
+    assert [item for item in streamer.items if "markdown_text" in item] == []
+
+
+def test_tool_failure_stops_model_continuation_with_single_clear_error():
+    provider = Provider(
+        error=NotebookToolError("SOURCE_NOT_READY", "来源还没有处于可读取状态")
+    )
+    rt, _, completions = runtime(
+        [[chunk_text("我先看看"), chunk_call()], [chunk_text("不应该继续生成")]],
+        provider=provider,
+    )
+    streamer = Streamer()
+
+    rt.run(streamer, [{"role": "user", "content": "读取来源"}])
+
+    markdowns = [
+        item["markdown_text"] for item in streamer.items if "markdown_text" in item
+    ]
+    assert len(completions.requests) == 1
+    assert len(markdowns) == 1
+    assert "SOURCE_NOT_READY" in markdowns[0]
+    assert "我先看看" not in markdowns[0]
+    assert "不应该继续生成" not in markdowns[0]
 
 
 def test_unknown_tool_is_not_forwarded():

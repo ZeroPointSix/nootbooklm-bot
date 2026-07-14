@@ -132,6 +132,24 @@ def format_error_message(exc: Exception) -> str:
     )
 
 
+def format_tool_failure_message(tool_name: str, code: str, detail: str) -> str:
+    actions = {
+        "SOURCE_NOT_READY": "请先执行 source_wait，或重新添加处理失败的来源后再读。",
+        "SOURCE_READ_UNSUPPORTED": "请先改用摘要读取，或重新添加一个 NotebookLM 支持全文读取的来源。",
+        "LOGIN_EXPIRED": "请重新执行 /notebook login 后再试。",
+        "TIMEOUT": "请稍后重试；如果持续超时，再检查 NotebookLM 上游状态。",
+        "NOTEBOOKLM_UPSTREAM_CHANGED": "请检查 NotebookLM 上游页面或 SDK 兼容性。",
+    }
+    action = actions.get(code, "请根据错误类型处理后重试。")
+    return (
+        ":warning: NotebookLM 工具调用失败\n"
+        f"• 工具：`{tool_name}`\n"
+        f"• 错误类型：`{code}`\n"
+        f"• 具体原因：{detail}\n"
+        f"• 建议动作：{action}"
+    )
+
+
 class AgentRuntime:
     def __init__(
         self,
@@ -157,7 +175,8 @@ class AgentRuntime:
             if round_number == self.max_tool_rounds:
                 raise RuntimeError("工具调用轮数超过安全上限")
             for call in tool_calls:
-                self._execute_call(streamer, prompts, allowed, call)
+                if not self._execute_call(streamer, prompts, allowed, call):
+                    return
 
     def _stream_once(
         self,
@@ -166,6 +185,7 @@ class AgentRuntime:
         tools: list[ToolDefinition],
     ) -> list[ChatToolCall]:
         calls: dict[int, dict[str, str]] = {}
+        text_chunks: list[str] = []
         response = self.llm.chat.completions.create(
             model=self.model,
             messages=[{"role": "system", "content": SYSTEM_PROMPT}, *prompts],
@@ -180,7 +200,7 @@ class AgentRuntime:
             delta = _get_nested(choices[0], "delta")
             content = _get_nested(delta, "content")
             if content:
-                streamer.append(markdown_text=str(content))
+                text_chunks.append(str(content))
             for tool_delta in _get_nested(delta, "tool_calls") or []:
                 index = _get_nested(tool_delta, "index")
                 if index is None:
@@ -232,6 +252,9 @@ class AgentRuntime:
                         )
                     ]
                 )
+        else:
+            for text in text_chunks:
+                streamer.append(markdown_text=text)
         return tool_calls
 
     def _execute_call(
@@ -240,7 +263,8 @@ class AgentRuntime:
         prompts: list[dict[str, Any]],
         allowed: dict[str, ToolDefinition],
         call: ChatToolCall,
-    ) -> None:
+    ) -> bool:
+        failure_message = None
         try:
             if call.name not in allowed:
                 raise NotebookToolError("UNKNOWN_TOOL", "模型请求了未注册的工具")
@@ -258,18 +282,28 @@ class AgentRuntime:
             )
             status = "error"
             title = "NotebookLM 工具参数无效"
-        except NotebookToolError as exc:
-            output = json.dumps(
-                {"error": exc.code, "message": str(exc)}, ensure_ascii=False
+            failure_message = format_tool_failure_message(
+                call.name, "INVALID_ARGUMENTS", "工具参数无效"
             )
+        except NotebookToolError as exc:
+            payload = {"error": exc.code, "message": str(exc)}
+            details = _redact(getattr(exc, "details", {}) or {})
+            if details:
+                payload["details"] = details
+            output = json.dumps(payload, ensure_ascii=False, default=str)
             status = "error"
             title = str(exc)
+            failure_message = format_tool_failure_message(call.name, exc.code, str(exc))
         prompts.append(
             {"role": "tool", "tool_call_id": call.call_id, "content": output}
         )
         streamer.append(
             chunks=[TaskUpdateChunk(id=call.call_id, title=title, status=status)]
         )
+        if failure_message:
+            streamer.append(markdown_text=failure_message)
+            return False
+        return True
 
 
 def call_llm(
