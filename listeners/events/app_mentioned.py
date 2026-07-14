@@ -4,6 +4,7 @@ from slack_bolt import Say
 from slack_sdk import WebClient
 
 from agent.llm_caller import call_llm, format_error_message
+from agent.thread_gateway import build_slack_thread_prompt, resolve_thread_ts
 from listeners.views.feedback_block import create_feedback_block
 
 
@@ -21,9 +22,13 @@ def app_mentioned_callback(client: WebClient, event: dict, logger: Logger, say: 
     try:
         channel_id = event.get("channel")
         team_id = event.get("team")
-        text = event.get("text")
-        thread_ts = event.get("thread_ts") or event.get("ts")
+        text = event.get("text") or ""
+        thread_ts = resolve_thread_ts(event)
+        current_ts = event.get("ts")
         user_id = event.get("user")
+        if not channel_id or not thread_ts:
+            logger.warning("Ignoring app mention without channel_id or thread_ts")
+            return
 
         client.assistant_threads_setStatus(
             channel_id=channel_id,
@@ -38,12 +43,17 @@ def app_mentioned_callback(client: WebClient, event: dict, logger: Logger, say: 
             recipient_user_id=user_id,
             thread_ts=thread_ts,
         )
-        prompts: list[dict] = [
-            {
-                "role": "user",
-                "content": text,
-            },
-        ]
+        prompts = build_slack_thread_prompt(
+            client=client,
+            team_id=team_id,
+            channel_id=channel_id,
+            thread_ts=thread_ts,
+            current_ts=current_ts,
+            current_user_id=user_id,
+            current_text=text,
+            logger=logger,
+            trigger_source="app_mention",
+        )
         call_llm(streamer, prompts)
 
         feedback_block = create_feedback_block()
