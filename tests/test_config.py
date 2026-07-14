@@ -4,12 +4,7 @@ from config.settings import ConfigurationError, Settings
 
 
 def test_bot_validation_rejects_missing_secrets(monkeypatch):
-    for key in (
-        "SLACK_BOT_TOKEN",
-        "SLACK_APP_TOKEN",
-        "LLM_API_KEY",
-        "OPENAI_API_KEY",
-    ):
+    for key in ("SLACK_BOT_TOKEN", "SLACK_APP_TOKEN", "OPENAI_API_KEY"):
         monkeypatch.delenv(key, raising=False)
     with pytest.raises(ConfigurationError, match="SLACK_BOT_TOKEN"):
         Settings.from_env().validate_bot()

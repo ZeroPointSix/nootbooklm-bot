@@ -4,23 +4,38 @@ from listeners.commands import notebook
 
 
 class Store:
+    def __init__(self, active=None):
+        self._active = active
+
     def active(self):
-        return None
+        return self._active
 
 
-class Profiles:
-    def __init__(self, exists):
-        self._exists = exists
+class FakeProvider:
+    def __init__(self, health):
+        self.health_result = health
 
-    def exists(self):
-        return self._exists
+    def health(self):
+        return self.health_result
 
 
-def run_status(monkeypatch, *, authenticated, profile_exists=False, error=None):
+def run_status(monkeypatch, *, health=None, health_error=None, active=None):
     replies = []
-    monkeypatch.setattr(notebook, "_sessions", Store())
-    monkeypatch.setattr(notebook, "_profiles", Profiles(profile_exists))
-    monkeypatch.setattr(notebook, "get_mcp_auth_status", lambda: (authenticated, error))
+    monkeypatch.setattr(notebook, "_sessions", Store(active=active))
+
+    if health_error is not None:
+
+        def raise_health(_settings):
+            raise health_error
+
+        monkeypatch.setattr(notebook, "build_notebook_provider", raise_health)
+    else:
+
+        def provider_factory(_settings):
+            return FakeProvider(health or {"ready": False, "backend": "native"})
+
+        monkeypatch.setattr(notebook, "build_notebook_provider", provider_factory)
+
     notebook.notebook_command(
         ack=lambda: None,
         command={"text": "status"},
@@ -29,37 +44,51 @@ def run_status(monkeypatch, *, authenticated, profile_exists=False, error=None):
     return replies[0]
 
 
-def test_status_uses_mcp_online_authenticated_state(monkeypatch):
-    message = run_status(monkeypatch, authenticated=True)
-    assert "在线验证通过" in message
-    assert "authenticated=true" in message
+def test_status_reports_ready_native_health(monkeypatch):
+    message = run_status(
+        monkeypatch,
+        health={
+            "ready": True,
+            "backend": "native",
+            "summary": "NotebookLM 已就绪",
+            "checks": [{"name": "storage_state", "status": "ok", "message": "ok"}],
+        },
+    )
+    assert "ready" in message
+    assert "native" in message
+    assert "NotebookLM 已就绪" in message
 
 
-def test_status_reports_mcp_authentication_failure_even_with_local_profile(monkeypatch):
-    message = run_status(monkeypatch, authenticated=False, profile_exists=True)
-    assert "在线验证未通过" in message
+def test_status_reports_not_ready_native_health(monkeypatch):
+    message = run_status(
+        monkeypatch,
+        health={
+            "ready": False,
+            "backend": "native",
+            "summary": "需要先执行 /notebook login",
+            "checks": [
+                {
+                    "name": "profile_file",
+                    "status": "failed",
+                    "message": "未找到默认账号 storage_state",
+                }
+            ],
+        },
+    )
+    assert "not_ready" in message
     assert "/notebook login" in message
 
 
-def test_status_separates_local_profile_from_unknown_mcp_state(monkeypatch):
+def test_status_reports_provider_failure(monkeypatch):
+    message = run_status(monkeypatch, health_error=RuntimeError("provider unavailable"))
+    assert "not_ready" in message
+    assert "provider unavailable" in message
+
+
+def test_active_login_session_is_reported(monkeypatch):
     message = run_status(
-        monkeypatch, authenticated=None, profile_exists=True, error="NotebookLM MCP 服务不可用"
+        monkeypatch,
+        active=SimpleNamespace(status=SimpleNamespace(value="browser_started")),
+        health={"ready": False, "backend": "native", "summary": "login in progress"},
     )
-    assert "已保存本地登录态" in message
-    assert "MCP 在线验证失败" in message
-
-
-def test_active_login_session_short_circuits_online_probe(monkeypatch):
-    replies = []
-    monkeypatch.setattr(
-        notebook,
-        "_sessions",
-        SimpleNamespace(active=lambda: SimpleNamespace(status=SimpleNamespace(value="browser_started"))),
-    )
-    monkeypatch.setattr(notebook, "get_mcp_auth_status", lambda: (_ for _ in ()).throw(AssertionError))
-    notebook.notebook_command(
-        ack=lambda: None,
-        command={"text": "status"},
-        respond=replies.append,
-    )
-    assert replies == ["NotebookLM 登录状态：browser_started"]
+    assert "browser_started" in message

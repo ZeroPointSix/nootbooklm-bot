@@ -19,7 +19,15 @@ class Profile:
         assert verify(None) is True
 
 
-def test_complete_login_message_does_not_claim_mcp_is_ready(monkeypatch):
+class FakeProvider:
+    def reconnect(self):
+        return None
+
+    def health(self):
+        return {"ready": True}
+
+
+def test_complete_login_notifies_native_provider_is_ready(monkeypatch):
     store = LoginSessionStore()
     session, token = store.create(
         team_id="T1", channel_id="C1", thread_ts="1.1", user_id="U1"
@@ -42,16 +50,18 @@ def test_complete_login_message_does_not_claim_mcp_is_ready(monkeypatch):
     monkeypatch.setattr("auth_app.get_session_store", lambda: store)
     monkeypatch.setattr("auth_app.get_profile_manager", lambda: profile)
     monkeypatch.setattr("auth_app.WebClient", SlackClient)
+    monkeypatch.setattr(
+        "auth_app.build_notebook_provider", lambda _settings: FakeProvider()
+    )
 
     response = complete_login(
         CompleteRequest(session_id=session.session_id, storage_state=VALID_STATE),
         x_internal_token="x" * 32,
     )
 
-    assert response == {"status": "authenticated"}
+    assert response == {"status": "authenticated", "backend": "native"}
     assert profile.installed == VALID_STATE
     assert posted
     message = posted[0]["text"]
-    assert "登录态已保存" in message
-    assert "在线验证" in message
-    assert "默认账号现在可以使用" not in message
+    assert "登录验证通过" in message
+    assert "内置工具" in message

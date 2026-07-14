@@ -49,7 +49,7 @@ class Settings:
             for name, value in (
                 ("SLACK_BOT_TOKEN", self.slack_bot_token),
                 ("SLACK_APP_TOKEN", self.slack_app_token),
-                ("LLM_API_KEY", self.llm_api_key),
+                ("OPENAI_API_KEY", self.openai_api_key),
             )
             if not value
         ]

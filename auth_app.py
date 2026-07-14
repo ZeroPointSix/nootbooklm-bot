@@ -72,15 +72,15 @@ def complete_login(
             return False
 
     try:
-        get_profile_manager().install(request.storage_state, verify=accept_storage_state)
+        get_profile_manager().install(request.storage_state, verify=verify)
         completed = get_session_store().transition(
             request.session_id, LoginStatus.AUTHENTICATED
         )
     except Exception as exc:
         get_session_store().transition(
-            request.session_id, LoginStatus.FAILED, "AUTH_SAVE_FAILED"
+            request.session_id, LoginStatus.FAILED, "AUTH_VERIFICATION_FAILED"
         )
-        raise HTTPException(status_code=422, detail="认证保存失败") from exc
+        raise HTTPException(status_code=422, detail="认证验证失败") from exc
     if settings.slack_bot_token:
         try:
             WebClient(token=settings.slack_bot_token).chat_postMessage(
