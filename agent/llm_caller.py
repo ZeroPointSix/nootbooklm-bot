@@ -1,11 +1,10 @@
 from __future__ import annotations
 
+import asyncio
 import json
-from dataclasses import dataclass
 from functools import lru_cache
 from typing import Any, Protocol
 
-import openai
 from slack_sdk.models.messages.chunk import TaskUpdateChunk
 from slack_sdk.web.chat_stream import ChatStream
 
@@ -13,9 +12,19 @@ from config import Settings
 from notebooklm_tool import (
     NotebookToolError,
     NotebookToolProvider,
-    ToolDefinition,
     build_notebook_provider,
 )
+
+from pi_agent.agent_core import (
+    Agent,
+    AgentEvent,
+    AgentTool,
+    AssistantMessage,
+    Model,
+    TextContent,
+    UserMessage,
+)
+from pi_agent.pi_ai import create_agent_stream_fn, create_default_registry
 
 SYSTEM_PROMPT = """你是 Slack 中的 NotebookLM 研究助手。
 NotebookLM 的任何操作都必须通过已提供的内置 NotebookLM 工具真实执行，绝不能虚构 Notebook、来源或结果。
@@ -24,6 +33,7 @@ NotebookLM 的任何操作都必须通过已提供的内置 NotebookLM 工具真
 工具失败时明确说明失败及安全的恢复建议。回答适合 Slack 阅读并保持简洁。"""
 
 
+# NOTE: pi-agent 的 Streamer 协议要求 append 方法支持 markdown_text 和 chunks
 class Streamer(Protocol):
     def append(self, **kwargs: Any) -> Any: ...
 
@@ -54,101 +64,6 @@ def _redact(value: Any) -> Any:
 def _safe_tool_output(result: dict[str, Any]) -> str:
     encoded = json.dumps(_redact(result), ensure_ascii=False, default=str)
     return encoded[:100_000]
-
-
-def _chat_tool(tool: ToolDefinition) -> dict[str, Any]:
-    return {
-        "type": "function",
-        "function": {
-            "name": tool.name,
-            "description": tool.description,
-            "parameters": tool.input_schema,
-        },
-    }
-
-
-@dataclass
-class ChatToolCall:
-    call_id: str
-    name: str
-    arguments: str
-
-
-def _get_nested(value: Any, *attrs: str) -> Any:
-    current = value
-    for attr in attrs:
-        if current is None:
-            return None
-        if isinstance(current, dict):
-            current = current.get(attr)
-        else:
-            current = getattr(current, attr, None)
-    return current
-
-
-def _error_text(exc: Exception) -> tuple[str, str]:
-    if isinstance(exc, openai.AuthenticationError):
-        return ("LLM_AUTH_ERROR", "LLM 网关认证失败，请检查 OpenAI 兼容 API Key 配置。")
-    if isinstance(exc, openai.PermissionDeniedError):
-        return ("LLM_PERMISSION_DENIED", "LLM 网关拒绝访问，请检查账号权限或模型权限。")
-    if isinstance(exc, openai.RateLimitError):
-        return ("LLM_RATE_LIMIT", "LLM 网关限流，请稍后重试或切换可用额度。")
-    if isinstance(exc, openai.APITimeoutError):
-        return ("LLM_TIMEOUT", "LLM 网关请求超时，NotebookLM 登录状态未必异常。")
-    if isinstance(exc, openai.APIConnectionError):
-        return (
-            "LLM_CONNECTION_ERROR",
-            "无法连接 LLM 网关，请检查网络或 OPENAI_BASE_URL。",
-        )
-    if isinstance(exc, openai.BadRequestError):
-        return (
-            "LLM_BAD_REQUEST",
-            f"LLM 网关不接受当前 OpenAI 兼容请求格式：{exc.message}",
-        )
-    if isinstance(exc, openai.APIStatusError):
-        body = _redact(getattr(exc, "body", None))
-        detail = (
-            json.dumps(body, ensure_ascii=False, default=str) if body else exc.message
-        )
-        return (
-            "LLM_STATUS_ERROR",
-            f"LLM 网关返回 HTTP {exc.status_code}：{detail[:500]}",
-        )
-    if isinstance(exc, NotebookToolError):
-        return (f"NOTEBOOKLM_{exc.code}", str(exc))
-    if isinstance(exc, RuntimeError):
-        return ("AGENT_RUNTIME_ERROR", str(exc))
-    return ("AGENT_UNKNOWN_ERROR", f"代理运行异常：{type(exc).__name__}")
-
-
-def format_error_message(exc: Exception) -> str:
-    code, detail = _error_text(exc)
-    return (
-        ":warning: NotebookLM 请求失败\n"
-        f"• 错误类型：`{code}`\n"
-        f"• 具体原因：{detail}\n"
-        "• 建议动作：如果 `/notebook status` 仍为 ready，请优先检查 LLM 网关；"
-        "如果状态不是 ready，再重新执行 `/notebook login`。"
-    )
-
-
-def format_tool_failure_message(tool_name: str, code: str, detail: str) -> str:
-    actions = {
-        "SOURCE_NOT_READY": "请先执行 source_wait，等待来源处理完成后再读。",
-        "SOURCE_PROCESSING_FAILED": "请删除该来源后重新添加，确认处理成功后再读取。",
-        "SOURCE_READ_UNSUPPORTED": "请先改用摘要读取，或重新添加一个 NotebookLM 支持全文读取的来源。",
-        "LOGIN_EXPIRED": "请重新执行 /notebook login 后再试。",
-        "TIMEOUT": "请稍后重试；如果持续超时，再检查 NotebookLM 上游状态。",
-        "NOTEBOOKLM_UPSTREAM_CHANGED": "请检查 NotebookLM 上游页面或 SDK 兼容性。",
-    }
-    action = actions.get(code, "请根据错误类型处理后重试。")
-    return (
-        ":warning: NotebookLM 工具调用失败\n"
-        f"• 工具：`{tool_name}`\n"
-        f"• 错误类型：`{code}`\n"
-        f"• 具体原因：{detail}\n"
-        f"• 建议动作：{action}"
-    )
 
 
 TOOL_TASK_COPY = {
@@ -293,7 +208,50 @@ def _tool_result_title(tool_name: str, result: dict[str, Any]) -> str:
     return _tool_task_title(tool_name, "complete", _tool_result_detail(result))
 
 
+def _error_text(exc: Exception) -> tuple[str, str]:
+    if isinstance(exc, NotebookToolError):
+        return (f"NOTEBOOKLM_{exc.code}", str(exc))
+    if isinstance(exc, RuntimeError):
+        return ("AGENT_RUNTIME_ERROR", str(exc))
+    return ("AGENT_UNKNOWN_ERROR", f"代理运行异常：{type(exc).__name__}")
+
+
+def format_error_message(exc: Exception) -> str:
+    code, detail = _error_text(exc)
+    return (
+        ":warning: NotebookLM 请求失败\n"
+        f"• 错误类型：`{code}`\n"
+        f"• 具体原因：{detail}\n"
+        "• 建议动作：如果 `/notebook status` 仍为 ready，请优先检查 LLM 网关；"
+        "如果状态不是 ready，再重新执行 `/notebook login`。"
+    )
+
+
+def format_tool_failure_message(tool_name: str, code: str, detail: str) -> str:
+    actions = {
+        "SOURCE_NOT_READY": "请先执行 source_wait，等待来源处理完成后再读。",
+        "SOURCE_PROCESSING_FAILED": "请删除该来源后重新添加，确认处理成功后再读取。",
+        "SOURCE_READ_UNSUPPORTED": "请先改用摘要读取，或重新添加一个 NotebookLM 支持全文读取的来源。",
+        "LOGIN_EXPIRED": "请重新执行 /notebook login 后再试。",
+        "TIMEOUT": "请稍后重试；如果持续超时，再检查 NotebookLM 上游状态。",
+        "NOTEBOOKLM_UPSTREAM_CHANGED": "请检查 NotebookLM 上游页面或 SDK 兼容性。",
+    }
+    action = actions.get(code, "请根据错误类型处理后重试。")
+    return (
+        ":warning: NotebookLM 工具调用失败\n"
+        f"• 工具：`{tool_name}`\n"
+        f"• 错误类型：`{code}`\n"
+        f"• 具体原因：{detail}\n"
+        f"• 建议动作：{action}"
+    )
+
+
 class AgentRuntime:
+    """
+    基于 pi-agent 的 AgentRuntime 实现。
+    使用 pi_agent.Agent 替代原有的 OpenAI 直接调用逻辑。
+    """
+
     def __init__(
         self,
         notebook: NotebookToolProvider,
@@ -301,161 +259,230 @@ class AgentRuntime:
         api_key: str,
         model: str = "gpt-4o-mini",
         max_tool_rounds: int = 8,
-        llm: Any | None = None,
+        llm: Any | None = None,  # 兼容旧接口，忽略此参数
     ):
         self.notebook = notebook
         self.model = model
         self.max_tool_rounds = max_tool_rounds
-        self.llm = llm or openai.OpenAI(api_key=api_key)
+        self.api_key = api_key
+
+        # 初始化 pi-agent 的 Provider Registry
+        self._registry = create_default_registry()
+        self._stream_fn = create_agent_stream_fn(self._registry)
+
+        # 配置 pi-agent 的 Model
+        # pi-agent 支持 OpenAI、Anthropic 等多种 provider
+        # 这里使用 openai 兼容模式
+        self._pi_model = Model(
+            id=model,
+            provider="openai",
+            api="openai",  # 使用 OpenAI Completions 兼容 API
+        )
 
     def run(self, streamer: Streamer, prompts: list[dict[str, Any]]) -> None:
-        tools = self.notebook.list_tools()
-        allowed = {tool.name: tool for tool in tools}
-        for round_number in range(self.max_tool_rounds + 1):
-            tool_calls = self._stream_once(streamer, prompts, tools)
-            if not tool_calls:
-                return
-            if round_number == self.max_tool_rounds:
-                raise RuntimeError("工具调用轮数超过安全上限")
-            for call in tool_calls:
-                if not self._execute_call(streamer, prompts, allowed, call):
-                    return
+        """
+        运行 agent 处理一轮对话。
+        将同步的 prompts 转换为 pi-agent 的消息格式并执行。
+        """
+        # 将 prompts 转换为 pi-agent 格式
+        messages = self._convert_prompts_to_messages(prompts)
 
-    def _stream_once(
-        self,
-        streamer: Streamer,
-        prompts: list[dict[str, Any]],
-        tools: list[ToolDefinition],
-    ) -> list[ChatToolCall]:
-        calls: dict[int, dict[str, str]] = {}
-        text_chunks: list[str] = []
-        response = self.llm.chat.completions.create(
-            model=self.model,
-            messages=[{"role": "system", "content": SYSTEM_PROMPT}, *prompts],
-            tools=[_chat_tool(tool) for tool in tools],
-            tool_choice="auto",
-            stream=True,
+        # 创建 pi-agent Agent 实例
+        agent = Agent(
+            stream_fn=self._stream_fn,
+            session_id="notebooklm-slack-agent",
         )
-        for chunk in response:
-            choices = _get_nested(chunk, "choices") or []
-            if not choices:
-                continue
-            delta = _get_nested(choices[0], "delta")
-            content = _get_nested(delta, "content")
-            if content:
-                text_chunks.append(str(content))
-            for tool_delta in _get_nested(delta, "tool_calls") or []:
-                index = _get_nested(tool_delta, "index")
-                if index is None:
-                    index = len(calls)
-                call = calls.setdefault(index, {"id": "", "name": "", "arguments": ""})
-                call_id = _get_nested(tool_delta, "id")
-                name = _get_nested(tool_delta, "function", "name")
-                arguments = _get_nested(tool_delta, "function", "arguments")
-                if call_id:
-                    call["id"] = str(call_id)
-                if name:
-                    call["name"] = str(name)
-                if arguments:
-                    call["arguments"] += str(arguments)
-        tool_calls = [
-            ChatToolCall(
-                call_id=call["id"],
-                name=call["name"],
-                arguments=call["arguments"],
-            )
-            for _, call in sorted(calls.items())
-            if call["id"] and call["name"]
-        ]
-        if tool_calls:
-            prompts.append(
-                {
-                    "role": "assistant",
-                    "content": None,
-                    "tool_calls": [
-                        {
-                            "id": call.call_id,
-                            "type": "function",
-                            "function": {
-                                "name": call.name,
-                                "arguments": call.arguments,
-                            },
-                        }
-                        for call in tool_calls
-                    ],
-                }
-            )
-            for call in tool_calls:
-                streamer.append(
-                    chunks=[
-                        TaskUpdateChunk(
-                            id=call.call_id,
-                            title=_tool_task_title(call.name, "in_progress"),
-                            status="in_progress",
-                        )
-                    ]
-                )
-        else:
-            for text in text_chunks:
-                streamer.append(markdown_text=text)
-        return tool_calls
+        agent.set_model(self._pi_model)
+        agent.set_system_prompt(SYSTEM_PROMPT)
+        agent.set_tools(self._build_pi_tools())
 
-    def _execute_call(
-        self,
-        streamer: Streamer,
-        prompts: list[dict[str, Any]],
-        allowed: dict[str, ToolDefinition],
-        call: ChatToolCall,
-    ) -> bool:
-        failure_message = None
+        # 设置事件监听器用于流式输出
+        self._setup_streamer_listener(agent, streamer)
+
+        # 同步运行 async 代码
         try:
-            if call.name not in allowed:
-                raise NotebookToolError("UNKNOWN_TOOL", "模型请求了未注册的工具")
-            arguments = json.loads(call.arguments or "{}")
-            if not isinstance(arguments, dict):
-                raise ValueError
-            result = self.notebook.call_tool(call.name, arguments)
-            output = _safe_tool_output(result)
-            status = "complete"
-            title = _tool_result_title(call.name, result)
-        except (json.JSONDecodeError, ValueError):
-            output = json.dumps(
-                {"error": "INVALID_ARGUMENTS", "message": "工具参数无效"},
-                ensure_ascii=False,
-            )
-            status = "error"
-            title = _tool_task_title(call.name, "error", "工具参数无效")
-            failure_message = format_tool_failure_message(
-                call.name, "INVALID_ARGUMENTS", "工具参数无效"
-            )
-        except NotebookToolError as exc:
-            payload = {"error": exc.code, "message": str(exc)}
-            details = _redact(getattr(exc, "details", {}) or {})
-            if details:
-                payload["details"] = details
-            output = json.dumps(payload, ensure_ascii=False, default=str)
-            status = "error"
-            title = _tool_task_title(call.name, "error", str(exc))
-            failure_message = format_tool_failure_message(call.name, exc.code, str(exc))
-        prompts.append(
-            {"role": "tool", "tool_call_id": call.call_id, "content": output}
-        )
-        streamer.append(
-            chunks=[TaskUpdateChunk(id=call.call_id, title=title, status=status)]
-        )
-        if failure_message:
-            streamer.append(markdown_text=failure_message)
-            return False
-        return True
+            asyncio.run(self._run_agent_async(agent, messages, streamer))
+        except RuntimeError as exc:
+            if "already running" in str(exc).lower():
+                # 如果已经在事件循环中，使用 run_until_complete
+                loop = asyncio.get_event_loop()
+                loop.run_until_complete(
+                    self._run_agent_async(agent, messages, streamer)
+                )
+            else:
+                raise
 
+    def _convert_prompts_to_messages(self, prompts: list[dict[str, Any]]) -> list:
+        """将 OpenAI 格式的 prompts 转换为 pi-agent 格式的消息。"""
+        messages = []
+        for prompt in prompts:
+            role = prompt.get("role")
+            content = prompt.get("content")
+            tool_calls = prompt.get("tool_calls")
 
-def call_llm(
-    streamer: ChatStream,
-    prompts: list[dict[str, Any]],
-    *,
-    runtime: AgentRuntime | None = None,
-) -> None:
-    (runtime or get_runtime()).run(streamer, prompts)
+            if role == "system":
+                # system prompt 单独处理，这里跳过
+                continue
+            elif role == "user":
+                if content:
+                    messages.append(UserMessage(content=content))
+            elif role == "assistant":
+                # assistant 消息包含 tool_calls 或文本内容
+                if tool_calls:
+                    # pi-agent 通过 tool_calls 在 AssistantMessage 中表示
+                    assistant_content = []
+                    for tc in tool_calls:
+                        func = tc.get("function", {})
+                        assistant_content.append(
+                            {
+                                "type": "toolCall",
+                                "id": tc.get("id", ""),
+                                "name": func.get("name", ""),
+                                "arguments": json.loads(func.get("arguments", "{}")),
+                            }
+                        )
+                    messages.append(
+                        AssistantMessage(
+                            content=assistant_content,
+                            api="openai",
+                            provider="openai",
+                            model=self.model,
+                        )
+                    )
+                elif content:
+                    messages.append(
+                        AssistantMessage(
+                            content=[TextContent(text=content)],
+                            api="openai",
+                            provider="openai",
+                            model=self.model,
+                        )
+                    )
+            elif role == "tool":
+                # tool 结果消息
+                tool_call_id = prompt.get("tool_call_id")
+                content = prompt.get("content", "")
+                messages.append(
+                    {
+                        "role": "toolResult",
+                        "tool_call_id": tool_call_id,
+                        "tool_name": "",  # 从 tool_call_id 推断或从上下文获取
+                        "content": [TextContent(text=content)],
+                        "is_error": "error" in json.loads(content)
+                        if content.startswith("{")
+                        else False,
+                    }
+                )
+        return messages
+
+    def _build_pi_tools(self) -> list[AgentTool]:
+        """将 NotebookLM 工具转换为 pi-agent AgentTool 格式。"""
+        from pi_agent.agent_core import AgentToolResult, TextContent
+
+        tools = self.notebook.list_tools()
+        pi_tools = []
+
+        for tool in tools:
+            tool_name = tool.name
+
+            async def execute(
+                tool_call_id: str,
+                params: dict[str, Any],
+                abort_event: asyncio.Event | None = None,
+                on_update=None,
+                _tool_name: str = tool_name,
+            ) -> AgentToolResult:
+                # 实际调用 NotebookLM 工具
+                # 在线程池中运行同步的 call_tool 以避免阻塞
+                loop = asyncio.get_event_loop()
+                result = await loop.run_in_executor(
+                    None, self.notebook.call_tool, _tool_name, params
+                )
+                # 转换为 pi-agent 的 AgentToolResult
+                return AgentToolResult(
+                    content=[TextContent(text=_safe_tool_output(result))],
+                    details=result,
+                )
+
+            pi_tools.append(
+                AgentTool(
+                    name=tool.name,
+                    label=tool.name.replace("_", " ").title(),
+                    description=tool.description,
+                    execute=execute,
+                )
+            )
+
+        return pi_tools
+
+    def _setup_streamer_listener(self, agent: Agent, streamer: Streamer) -> None:
+        """设置事件监听器将 pi-agent 事件转发到 Slack streamer。"""
+
+        def on_agent_event(event: AgentEvent) -> None:
+            event_type = event.get("type")
+
+            if event_type == "toolcall_start":
+                # 工具调用开始
+                tool_name = event.get("tool_call", {}).get("name", "")
+                call_id = event.get("tool_call", {}).get("id", "")
+                if tool_name:
+                    streamer.append(
+                        chunks=[
+                            TaskUpdateChunk(
+                                id=call_id,
+                                title=_tool_task_title(tool_name, "in_progress"),
+                                status="in_progress",
+                            )
+                        ]
+                    )
+
+            elif event_type == "toolcall_end":
+                # 工具调用结束
+                tool_call = event.get("tool_call", {})
+                tool_name = tool_call.get("name", "")
+                call_id = tool_call.get("id", "")
+                if tool_name:
+                    # 这里需要从结果中获取状态，暂时标记为 complete
+                    streamer.append(
+                        chunks=[
+                            TaskUpdateChunk(
+                                id=call_id,
+                                title=_tool_task_title(tool_name, "complete"),
+                                status="complete",
+                            )
+                        ]
+                    )
+
+            elif event_type == "text_delta":
+                # 文本增量输出
+                delta = event.get("delta", "")
+                if delta:
+                    streamer.append(markdown_text=delta)
+
+            elif event_type == "done":
+                # 对话结束
+                message = event.get("message")
+                if (
+                    message
+                    and hasattr(message, "error_message")
+                    and message.error_message
+                ):
+                    streamer.append(
+                        markdown_text=format_error_message(
+                            RuntimeError(message.error_message)
+                        )
+                    )
+
+        agent.subscribe(on_agent_event)
+
+    async def _run_agent_async(
+        self, agent: Agent, messages: list, streamer: Streamer
+    ) -> None:
+        """异步运行 agent。"""
+        if messages:
+            await agent.prompt(messages)
+        else:
+            await agent.continue_()
 
 
 @lru_cache(maxsize=1)
@@ -469,3 +496,12 @@ def get_runtime() -> AgentRuntime:
         model=settings.openai_model,
         max_tool_rounds=settings.max_tool_rounds,
     )
+
+
+def call_llm(
+    streamer: ChatStream,
+    prompts: list[dict[str, Any]],
+    *,
+    runtime: AgentRuntime | None = None,
+) -> None:
+    (runtime or get_runtime()).run(streamer, prompts)
